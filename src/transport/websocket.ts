@@ -11,6 +11,7 @@
  * @see https://microsoft.github.io/agent-host-protocol/specification/transport
  */
 
+import { chmodSync, rmSync } from "node:fs";
 import { createServer, type Server as HttpServer } from "node:http";
 import { type WebSocket, WebSocketServer } from "ws";
 import type { Transport } from "../core/connection.ts";
@@ -20,6 +21,11 @@ import type { JsonRpcMessage } from "../protocol/jsonrpc.ts";
 export interface WebSocketTransportOptions {
 	readonly host?: string;
 	readonly port?: number;
+	/**
+	 * Listen on a unix socket instead of TCP (for example code-server's `--agent-host-bridge-path`). The
+	 * file is created 0600; a stale one from a crashed run is replaced.
+	 */
+	readonly socketPath?: string;
 	/** Expected as `?token=` or VS Code's `?tkn=` when set. */
 	readonly connectionToken?: string;
 	readonly log?: (message: string) => void;
@@ -117,6 +123,19 @@ export async function serveWebSocket(
 		ahpHost.accept(new WebSocketClientTransport(socket, options.log));
 	});
 
+	if (options.socketPath) {
+		rmSync(options.socketPath, { force: true });
+		await new Promise<void>((resolve, reject) => {
+			httpServer.once("error", reject);
+			httpServer.listen(options.socketPath, () => {
+				httpServer.removeListener("error", reject);
+				resolve();
+			});
+		});
+		chmodSync(options.socketPath, 0o600);
+		return { host: options.socketPath, port: 0, close: () => closeServer(wss, httpServer) };
+	}
+
 	await new Promise<void>((resolve, reject) => {
 		httpServer.once("error", reject);
 		httpServer.listen(bindPort, bindHost, () => {
@@ -133,14 +152,17 @@ export async function serveWebSocket(
 	return {
 		host: bindHost,
 		port: address.port,
-		close: () =>
-			new Promise<void>((resolve) => {
-				for (const client of wss.clients) {
-					client.terminate();
-				}
-				wss.close(() => {
-					httpServer.close(() => resolve());
-				});
-			}),
+		close: () => closeServer(wss, httpServer),
 	};
+}
+
+function closeServer(wss: WebSocketServer, httpServer: HttpServer): Promise<void> {
+	return new Promise<void>((resolve) => {
+		for (const client of wss.clients) {
+			client.terminate();
+		}
+		wss.close(() => {
+			httpServer.close(() => resolve());
+		});
+	});
 }

@@ -1,6 +1,6 @@
-/** Shares one native recursive subscription across watches of the same canonical root. */
+/** Shares one recursive subscription (chokidar, pure JavaScript) across watches of the same canonical root. */
 
-import { openParcelWatchSource } from "./parcel-watch-source.ts";
+import { openChokidarRecursiveSource } from "./chokidar-watch-source.ts";
 import type { FileWatchChangeKind, FileWatchSource } from "./watch-source.ts";
 
 type OpenSource = (root: string) => Promise<FileWatchSource>;
@@ -27,7 +27,7 @@ export class ParcelWatchPool {
 	readonly #entries = new Map<string, SharedEntry>();
 	readonly #closing = new Map<string, Promise<void>>();
 
-	constructor(open: OpenSource = (root) => openParcelWatchSource({ root })) {
+	constructor(open: OpenSource = (root) => openChokidarRecursiveSource(root)) {
 		this.#open = open;
 	}
 

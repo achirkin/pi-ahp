@@ -274,8 +274,8 @@ it("archives and marks a new live session read before Pi has written its JSONL f
 	assert.equal(must(harness.metadata).sessions.get(id, "read"), true);
 	const flags = SessionStatus.IsArchived | SessionStatus.IsRead;
 	assert.equal((harness.host.store.get(session) as SessionState).status & flags, flags);
+	// No turn has started, so the session is not in the catalogue yet (fork change: see FORK.md).
 	const listed = await client.request("listSessions", { channel: ROOT_CHANNEL });
-	const summary = must(listed.items.find((item) => item.resource === session));
-	assert.equal(summary.status & flags, flags);
+	assert.equal(listed.items.find((item) => item.resource === session), undefined);
 	assert.equal(existsSync(file), false, "metadata actions must not flush Pi history");
 });

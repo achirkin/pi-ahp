@@ -23,9 +23,9 @@ import { assertValid } from "./support/schema.ts";
 
 async function expectVscodeDisposalRefusal(request: Promise<unknown>): Promise<void> {
 	const error = await expectRpcError(request, JsonRpcErrorCodes.InvalidRequest);
-	assert.match(error.message, /temporarily disabled for VS Code/u);
-	assert.match(error.message, /VS Code provisional-session lifecycle bug/u);
-	assert.match(error.message, /session was kept/u);
+	assert.match(error.message, /this editor window created and used it/u);
+	assert.match(error.message, /VS Code's provisional-session lifecycle bug/u);
+	assert.match(error.message, /Reload the editor window/u);
 }
 
 async function initialSnapshotResources(
@@ -102,19 +102,19 @@ describe("client URI dialects over the wire", () => {
 });
 
 describe("VS Code session disposal workaround", () => {
-	it("protects a durable session that this connection did not create", async () => {
+	it("deletes a durable session that this connection did not create: it is the user's Delete", async () => {
 		const fixture = await startHydratedSessionFixture();
 		try {
 			const client = await fixture.connectAsVSCode();
 			const resource = `pi:/${fixture.sessionId}`;
 
-			await expectVscodeDisposalRefusal(client.request("disposeSession", { channel: resource }));
+			await client.request("disposeSession", { channel: resource });
 
-			assert.deepEqual(fixture.deletedFiles, []);
+			assert.equal(fixture.deletedFiles.length, 1);
 			const listed = await client.request("listSessions", { channel: ROOT_CHANNEL });
 			assert.equal(
 				listed.items.some((item) => item.resource === resource),
-				true,
+				false,
 			);
 		} finally {
 			await fixture.close();

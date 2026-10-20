@@ -17,10 +17,11 @@ export class ClientConnection {
 	clientId = "";
 	readonly subscriptions = new Set<URI>();
 	readonly transport: Transport;
-	readonly workarounds = new ClientWorkarounds();
+	readonly workarounds: ClientWorkarounds;
 
-	constructor(transport: Transport) {
+	constructor(transport: Transport, log: (message: string) => void = () => {}) {
 		this.transport = transport;
+		this.workarounds = new ClientWorkarounds(log, () => this.subscriptions);
 	}
 
 	send(message: JsonRpcMessage): void {

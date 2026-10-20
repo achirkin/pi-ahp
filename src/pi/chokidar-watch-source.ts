@@ -122,6 +122,23 @@ export async function openChokidarWatchSource(request: ChokidarWatchRequest): Pr
 	return readySource(watcher);
 }
 
+/**
+ * A recursive directory watch on chokidar (inotify through fs.watch on Linux). This is the
+ * pure-JavaScript replacement for the native @parcel/watcher source of upstream pi-ahp, which
+ * could not be shipped as one portable bundle (glibc/musl, x86_64/aarch64). The git object
+ * store and package trees are pruned: nothing a client shows depends on their churn, and
+ * inotify watches are a finite resource.
+ */
+export async function openChokidarRecursiveSource(root: string): Promise<FileWatchSource> {
+	const watcher = watch(root, {
+		atomic: true,
+		followSymlinks: false,
+		ignoreInitial: true,
+		ignored: (path: string) => /(^|[\\/])(\.git[\\/](objects|lfs|logs)|node_modules)([\\/]|$)/.test(path),
+	});
+	return readySource(watcher);
+}
+
 /** Watches a caller-selected set of narrow paths, with its own traversal policy. */
 export function openChokidarWatchTargets(
 	request: { readonly targets: readonly string[]; readonly ignored: (path: string) => boolean },

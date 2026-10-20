@@ -192,6 +192,12 @@ export class SessionRegistry {
 	readonly #byChat = new Map<URI, LiveSession>();
 	/** Last root-catalog value used as a diff baseline; never authoritative state. */
 	readonly #summaryBaselines = new Map<URI, SessionSummary>();
+	/**
+	 * Sessions created here that no turn has started on. VS Code makes one for every new chat, and drops half of them
+	 * without a `disposeSession`; pi writes no file for them either, so listing them would pile "New Session" rows up in
+	 * every client. They stay out of the catalogue (listing and notifications) until the first turn begins.
+	 */
+	readonly #unannounced = new Set<URI>();
 	/** Coalesces duplicate disposal requests and blocks new work during deletion. */
 	readonly #disposals = new Map<string, Promise<void>>();
 	/** Prevents projection-generated session actions from recursively republishing. */
@@ -357,13 +363,15 @@ export class SessionRegistry {
 
 	/** Live summaries that override or supplement pi's on-disk catalogue. */
 	catalogueOverrides(): LiveSessionCatalogueEntry[] {
-		return [...this.#sessions.values()].map((session) => {
-			const file = session.sessionManager.getSessionFile();
-			return {
-				summary: this.#summaryOf(session),
-				...(file ? { file } : {}),
-			};
-		});
+		return [...this.#sessions.values()]
+			.filter((session) => !this.#unannounced.has(session.uri))
+			.map((session) => {
+				const file = session.sessionManager.getSessionFile();
+				return {
+					summary: this.#summaryOf(session),
+					...(file ? { file } : {}),
+				};
+			});
 	}
 
 	// ── Lifecycle ───────────────────────────────────────────────────────────
@@ -421,9 +429,9 @@ export class SessionRegistry {
 		this.#track(session);
 		this.#notifySessionAvailableToAll(session);
 
-		const summary = this.#summaryOf(session);
-		notifySessionAdded(this.#host, summary);
-		this.#summaryBaselines.set(uri, summary);
+		// Announced to the catalogue when the first turn starts (#publishSummary), not before.
+		this.#unannounced.add(uri);
+		this.#summaryBaselines.set(uri, this.#summaryOf(session));
 		this.#bumpActiveSessions();
 
 		// Readiness is genuinely asynchronous once a backend is involved: the
@@ -503,7 +511,10 @@ export class SessionRegistry {
 				sessionId = session.sessionId;
 				quiesced = session.driver;
 				await quiesced?.quiesce();
-				file = session.sessionManager.getSessionFile();
+				// The file on disk is found by id, as for a session never live here. A live session's manager can name a
+				// path that is not where the file is (the pi that wrote it may be another process), and deleting a path that
+				// does not exist would report success and leave the session behind.
+				file = (await this.#options.findSessionFile?.(sessionId)) ?? session.sessionManager.getSessionFile();
 
 				// Storage-only or failed-start backends have no driver to close a turn.
 				const chat = this.#host.store.get(session.chatChannel) as ChatState | undefined;
@@ -581,7 +592,7 @@ export class SessionRegistry {
 		}
 		this.#host.deleteChannel(uri);
 		this.#summaryBaselines.delete(uri);
-		notifySessionRemoved(this.#host, uri);
+		if (!this.#unannounced.delete(uri)) notifySessionRemoved(this.#host, uri);
 		this.#bumpActiveSessions();
 	}
 
@@ -902,6 +913,14 @@ export class SessionRegistry {
 	/** Publishes only changed root-catalog fields. */
 	#publishSummary(session: LiveSession): void {
 		const current = this.#summaryOf(session);
+		if (this.#unannounced.has(session.uri)) {
+			const chat = this.#host.store.get(session.chatChannel) as ChatState | undefined;
+			if (!chat || (chat.turns.length === 0 && !chat.activeTurn)) return;
+			this.#unannounced.delete(session.uri);
+			this.#summaryBaselines.set(session.uri, current);
+			notifySessionAdded(this.#host, current);
+			return;
+		}
 		const previous = this.#summaryBaselines.get(session.uri);
 		const changes: Partial<SessionSummary> = {};
 		if (!previous || current.title !== previous.title) changes.title = current.title;

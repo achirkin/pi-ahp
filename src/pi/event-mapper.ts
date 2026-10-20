@@ -172,6 +172,7 @@ export class TurnMapper {
 	/** Tool calls that reached `ready` and have not completed. */
 	/** Live tool calls, against how each should be described once it ends. */
 	readonly #liveToolCalls = new Map<string, string>();
+	readonly #startedToolCalls = new Set<string>();
 	#result: TurnResult = { outcome: "complete" };
 	/** Streaming error for the current assistant message, not an earlier retry. */
 	#attemptErrorMessage: string | undefined;
@@ -327,6 +328,7 @@ export class TurnMapper {
 		this.#parts = new Map();
 		this.#toolCallsByIndex = new Map();
 		this.#liveToolCalls.clear();
+		this.#startedToolCalls.clear();
 		this.#result = { outcome: "complete" };
 		this.#attemptErrorMessage = undefined;
 
@@ -473,6 +475,7 @@ export class TurnMapper {
 			return [];
 		}
 		this.#toolCallsByIndex.set(contentIndex, toolCallId);
+		this.#startedToolCalls.add(toolCallId);
 		const toolName = block.name ?? "tool";
 		return [
 			{
@@ -531,7 +534,13 @@ export class TurnMapper {
 		const description = describeToolCall(toolName, args, this.#options.workingDirectory);
 		const toolInput = toolInputFor(toolName, args);
 		this.#liveToolCalls.set(toolCallId, describeFinishedToolCall(toolName, args, this.#options.workingDirectory));
+		// A reducer drops a call it never saw start; pi that skips `toolcall_start` must not make the call vanish.
+		const start: StateAction[] = this.#startedToolCalls.has(toolCallId)
+			? []
+			: [{ type: ActionType.ChatToolCallStart, turnId: this.turnId, toolCallId, toolName, displayName: toolName }];
+		this.#startedToolCalls.add(toolCallId);
 		return [
+			...start,
 			{
 				type: ActionType.ChatToolCallReady,
 				turnId: this.turnId,

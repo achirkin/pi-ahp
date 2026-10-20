@@ -1,9 +1,11 @@
 import { stat } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { userInfo } from "node:os";
 import { basename } from "node:path";
 import {
 	ActionType,
 	AhpErrorCodes,
+	JsonRpcErrorCodes,
 	type CreateTerminalParams,
 	type StateAction,
 	TerminalClaimKind,
@@ -11,7 +13,6 @@ import {
 	type TerminalState,
 	type URI,
 } from "@microsoft/agent-host-protocol";
-import { spawn as spawnPty } from "node-pty";
 import { terminalInfo } from "../channels/terminal.ts";
 import { channelKind, ROOT_CHANNEL, sessionIdFromUri } from "../core/channels.ts";
 import type { AhpHost, TerminalHandler } from "../core/host.ts";
@@ -56,6 +57,23 @@ const DEFAULT_ROWS = 24;
 const MAX_DIMENSION = 65_535;
 const OUTPUT_BATCH_DELAY_MS = 8;
 const OUTPUT_BATCH_THRESHOLD_CHARS = 16 * 1024;
+
+/**
+ * node-pty carries a native addon, so it is an optional dependency loaded on first use: a host
+ * where it cannot load (another libc, a stripped install) loses terminals and nothing else.
+ */
+const spawnPty: PtySpawner = (file, args, options) => {
+	let spawn: PtySpawner;
+	try {
+		spawn = (createRequire(import.meta.url)("node-pty") as { spawn: PtySpawner }).spawn;
+	} catch (error) {
+		throw new ProtocolError(
+			JsonRpcErrorCodes.InternalError,
+			`Terminals are not available on this host: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
+		);
+	}
+	return spawn(file, args, options);
+};
 
 function validDimension(value: number): boolean {
 	return Number.isSafeInteger(value) && value > 0 && value <= MAX_DIMENSION;

@@ -113,11 +113,9 @@ describe("session disposal", () => {
 				(fixture.harness.host.store.get(ROOT_CHANNEL) as { activeSessions?: number }).activeSessions,
 				activeBefore,
 			);
+			// No turn has started on it, so it was never in the catalogue (fork change: see FORK.md).
 			const listed = await fixture.client.request("listSessions", { channel: ROOT_CHANNEL });
-			assert.deepEqual(
-				listed.items.map((item) => item.resource),
-				[uri],
-			);
+			assert.deepEqual(listed.items, []);
 
 			fixture.client.dispatch(uri, { type: ActionType.SessionTitleChanged, title: "Still here" });
 			await fixture.client.ping();

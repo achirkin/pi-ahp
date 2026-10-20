@@ -15,6 +15,7 @@ import {
 	SessionLifecycle,
 	type SessionState,
 	SessionStatus,
+	type SessionSummary,
 	type SessionSummaryChangedParams,
 	SUPPORTED_PROTOCOL_VERSIONS,
 	sessionReducer,
@@ -237,9 +238,15 @@ describe("session summary over the wire", () => {
 
 	it("publishes exact start deltas and lists an unpersisted session for new clients", async (t) => {
 		const f = await fixture(t);
+		// A session no turn has started on stays out of the catalogue (fork change: see FORK.md).
+		assert.deepEqual((await f.client.request("listSessions", { channel: ROOT_CHANNEL })).items, []);
+		assert.equal(f.notifications.filter((n) => n.method === "root/sessionAdded").length, 0);
 		await f.start();
+		// The first turn announces the session with its title, so the title is not a separate delta.
+		const added = f.notifications.filter((n) => n.method === "root/sessionAdded");
+		assert.equal(added.length, 1);
+		assert.equal((added[0]?.params as { summary: SessionSummary }).summary.title, "go");
 		assert.deepEqual(f.changes(), [
-			{ channel: ROOT_CHANNEL, session: f.alias, changes: { title: "go" } },
 			{
 				channel: ROOT_CHANNEL,
 				session: f.alias,

@@ -152,20 +152,20 @@ describe("session lifecycle", () => {
 		assert.equal(live.sessionManager.getSessionId(), id);
 	});
 
-	it("announces the new session on the root channel", async () => {
+	it("does not announce a new session on the root channel until a turn starts", async () => {
 		const client = await initialized();
 		const rootSubscription = client.attachSubscription(ROOT_CHANNEL);
 		const id = randomUUID();
-		const uri = sessionUri(id);
 
-		await client.request("createSession", { channel: uri });
+		await client.request("createSession", { channel: sessionUri(id) });
 
-		const event = await nextEvent(rootSubscription, (candidate) => candidate.type === "sessionAdded");
-		const params = event.params as { summary: SessionSummary };
-		assert.equal(params.summary.resource, uri);
-		assert.equal(params.summary.defaultChat, chatUri(id));
-		assert.deepEqual(params.summary.chats, [{ resource: chatUri(id), title: params.summary.title }]);
-		assertValid("state", "SessionSummary", params.summary);
+		// VS Code creates a session for every new chat and drops half of them: they stay out of the catalogue (see FORK.md).
+		await assert.rejects(
+			nextEvent(rootSubscription, (candidate) => candidate.type === "sessionAdded", 300),
+			/timed out waiting for an event/,
+		);
+		const listed = await client.request("listSessions", { channel: ROOT_CHANNEL });
+		assert.equal(listed.items.find((item) => item.resource === sessionUri(id)), undefined);
 	});
 
 	it("rejects a duplicate session URI with SessionAlreadyExists", async () => {
@@ -218,7 +218,7 @@ describe("session lifecycle", () => {
 		assert.equal(after, before + 1);
 	});
 
-	it("disposes a session, drops its channel, and announces the removal", async () => {
+	it("disposes a session and drops its channel; a session never announced is not announced as removed", async () => {
 		const client = await initialized();
 		const rootSubscription = client.attachSubscription(ROOT_CHANNEL);
 		const id = randomUUID();
@@ -233,8 +233,11 @@ describe("session lifecycle", () => {
 
 		await client.request("disposeSession", { channel: uri });
 
-		const event = await nextEvent(rootSubscription, (candidate) => candidate.type === "sessionRemoved");
-		assert.equal((event.params as { session: string }).session, uri);
+		// Never announced, so its removal is not announced either.
+		await assert.rejects(
+			nextEvent(rootSubscription, (candidate) => candidate.type === "sessionRemoved", 300),
+			/timed out waiting for an event/,
+		);
 		assert.equal(harness.host.store.has(uri), false);
 		assert.equal(harness.sessions?.get(uri), undefined);
 		assert.equal(harness.host.subscriberCount(uri), 0);

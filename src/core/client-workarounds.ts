@@ -21,7 +21,7 @@ const DERIVED_CHAT_URI = /^ahp-chat:\/\/[^/]+\/([^/?#]+)$/;
 const VSCODE_CLIENT_NAMES = new Set(["vscode-editor-window", "vscode-agents-window"]);
 
 const VSCODE_MATERIALIZED_SESSION_DISPOSAL_REFUSAL =
-	"Materialized session disposal is temporarily disabled for VS Code because of a VS Code provisional-session lifecycle bug; this session was kept.";
+	"Cannot delete this session yet: this editor window created and used it, and VS Code's provisional-session lifecycle bug would make a delete look the same as its own cleanup. Reload the editor window and delete it then.";
 
 /** Actions after which a session is no longer an abandoned empty draft. */
 const MATERIALIZING_ACTIONS = new Set<string>([
@@ -100,16 +100,47 @@ function hasVscodeClientMeta(value: unknown): boolean {
 }
 
 /**
- * Allows VS Code to clean up only sessions known to be unused drafts on this
- * connection. Unknown sessions are protected: reconnect does not carry enough
- * history to prove that they are empty.
+ * The sessions each VS Code client created through `createSession`, by client id. A reconnect keeps its
+ * client's ledger (the client's provisional-session service is the same one); a fresh `initialize` starts it over.
+ */
+const CREATED_SESSIONS = new Map<string, Map<URI, TrackedSessionState>>();
+
+/** What the guard reports about a refused or allowed disposal (one line in the host log). */
+export type DisposalLog = (line: string) => void;
+
+/**
+ * VS Code sends the same `disposeSession` for two things: the user's Delete in the sessions list, and its
+ * provisional-session service tearing down a draft it created (which, after the draft was used, deletes a real
+ * session: the VS Code bug this guard works around). The service only ever disposes sessions it created itself
+ * through `createSession` on this client, so:
+ *
+ * - a session this client did not create is an explicit delete: allowed;
+ * - a session this client created and has not used is an abandoned draft: allowed;
+ * - a session this client created and used is the ambiguous case: refused with a message that says so.
  *
  * Remove this tracker when VS Code graduates materialized remote sessions
  * before tearing down its provisional-session service.
  */
 class VscodeSessionDisposalGuard {
-	readonly #sessions = new Map<URI, TrackedSessionState>();
+	#sessions = new Map<URI, TrackedSessionState>();
 	readonly #pendingRequests = new Map<number, PendingLifecycleRequest>();
+	readonly #log: DisposalLog;
+	readonly #subscribed: () => Iterable<URI>;
+
+	constructor(log: DisposalLog, subscribed: () => Iterable<URI>) {
+		this.#log = log;
+		this.#subscribed = subscribed;
+	}
+
+	/** Binds the ledger of the client that completed the handshake. */
+	bindClient(clientId: string, fresh: boolean): void {
+		let ledger = fresh ? undefined : CREATED_SESSIONS.get(clientId);
+		if (!ledger) {
+			ledger = new Map();
+			CREATED_SESSIONS.set(clientId, ledger);
+		}
+		this.#sessions = ledger;
+	}
 
 	applyToIncoming(message: JsonRpcRequest | JsonRpcNotification, params: MessageParams): void {
 		const channel = typeof params.channel === "string" ? params.channel : undefined;
@@ -132,9 +163,14 @@ class VscodeSessionDisposalGuard {
 		if (message.method !== "disposeSession") {
 			return;
 		}
-		if (this.#sessions.get(session) !== "empty") {
+		const state = this.#sessions.get(session);
+		const open = [...this.#subscribed()].some((uri) => owningSessionUri(uri) === session);
+		const what = `disposeSession ${session} (created here: ${state ?? "no"}, open in this connection: ${open})`;
+		if (state !== undefined && state !== "empty") {
+			this.#log(`refused ${what}`);
 			throw new ProtocolError(JsonRpcErrorCodes.InvalidRequest, VSCODE_MATERIALIZED_SESSION_DISPOSAL_REFUSAL);
 		}
+		this.#log(`allowed ${what}`);
 		this.#sessions.set(session, "disposing");
 		this.#pendingRequests.set(message.id, { kind: "dispose", session });
 	}
@@ -182,7 +218,8 @@ class VscodeSessionDisposalGuard {
 		if ("result" in message) {
 			this.#sessions.delete(pending.session);
 		} else if (state === "disposing") {
-			this.#sessions.set(pending.session, "empty");
+			// The disposal failed: the session is back to what it was before (an unknown one stays unknown).
+			this.#sessions.delete(pending.session);
 		}
 	}
 
@@ -211,7 +248,16 @@ class VscodeSessionDisposalGuard {
 export class ClientWorkarounds {
 	#isVscode = false;
 	#usesProviderSessionUris = false;
-	readonly #vscodeSessionDisposal = new VscodeSessionDisposalGuard();
+	readonly #vscodeSessionDisposal: VscodeSessionDisposalGuard;
+
+	constructor(log: DisposalLog = () => {}, subscribed: () => Iterable<URI> = () => []) {
+		this.#vscodeSessionDisposal = new VscodeSessionDisposalGuard(log, subscribed);
+	}
+
+	/** Called when the handshake names the client: `fresh` for `initialize`, not for `reconnect`. */
+	bindClient(clientId: string, fresh: boolean): void {
+		this.#vscodeSessionDisposal.bindClient(clientId, fresh);
+	}
 
 	/** Reads implementation identity without erasing observations from wire traffic. */
 	identify(clientInfo: { name?: string } | undefined): void {

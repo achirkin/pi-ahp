@@ -349,12 +349,7 @@ describe("reconnect after host restart", () => {
 			);
 			assert.equal((sessionSnapshot.state as SessionState).defaultChat, clientChat);
 
-			const disposalError = await expectRpcError(
-				client.request("disposeSession", { channel: clientSession }),
-				JsonRpcErrorCodes.InvalidRequest,
-			);
-			assert.match(disposalError.message, /VS Code provisional-session lifecycle bug/u);
-			assert.equal(harness.host.store.has(sessionUri(id)), true);
+			// Deleting it is the user's own Delete here (fork change: see FORK.md); test/client-workarounds.test.ts covers disposal.
 
 			const subscribed = await client.subscribe(clientChat);
 			const chatSnapshot = must(subscribed.result.snapshot);
