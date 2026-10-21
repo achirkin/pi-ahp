@@ -169,6 +169,8 @@ export interface SessionRegistryOptions {
 	readonly deleteFile?: (path: string) => SessionFileDeletionResult | Promise<SessionFileDeletionResult>;
 	/** Locates the file behind a session this host never ran. */
 	readonly findSessionFile?: (sessionId: string) => Promise<string | undefined>;
+	/** Rewrites a user's message for its session just before pi gets it. */
+	readonly prepareMessage?: (sessionId: string, message: Message) => Message;
 	readonly log?: (message: string) => void;
 }
 
@@ -625,11 +627,13 @@ export class SessionRegistry {
 				backend.dispose?.();
 				return;
 			}
+			const prepare = this.#options.prepareMessage;
 			session.driver = new ChatDriver({
 				host: this.#host,
 				chatChannel: session.chatChannel,
 				backend,
 				workingDirectory: session.workingDirectory,
+				...(prepare ? { prepareMessage: (message: Message) => prepare(session.sessionId, message) } : {}),
 				// A completed turn's last entry is wherever the leaf now points.
 				recordTurnAnchor: (turnId) => {
 					const leaf = session.sessionManager.getLeafEntry();

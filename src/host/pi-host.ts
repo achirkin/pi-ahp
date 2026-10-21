@@ -5,7 +5,7 @@
 
 import { clampThinkingLevel, type Model } from "@earendil-works/pi-ai";
 import { createAgentSessionServices, type ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { type CreateSessionParams, type ModelSelection, type URI } from "@microsoft/agent-host-protocol";
+import { type CreateSessionParams, type Message, type ModelSelection, type URI } from "@microsoft/agent-host-protocol";
 import { installRootChannel } from "../channels/root.ts";
 import { sessionUri } from "../core/channels.ts";
 import { AhpHost, type HostOptions } from "../core/host.ts";
@@ -56,6 +56,8 @@ export interface PiHostOptions extends HostOptions {
 	 * unrestricted. See `src/pi/resource-paths.ts` for why that is the default.
 	 */
 	readonly resourceRoots?: readonly string[];
+	/** Rewrites a user's message for its session just before pi gets it (see {@link UploadStore.adopt}). */
+	readonly prepareMessage?: (sessionId: string, message: Message) => Message;
 }
 
 export interface PiHost {
@@ -151,6 +153,7 @@ export async function createPiHost(options: PiHostOptions): Promise<PiHost> {
 		defaultSelection: fallbackSelection,
 		deleteFile: options.deleteFile ?? deleteSessionFile,
 		findSessionFile: (id) => catalogue.findSessionFile(id),
+		...(options.prepareMessage ? { prepareMessage: options.prepareMessage } : {}),
 		...(options.log ? { log: options.log } : {}),
 	});
 	const sessionHydrator = new SessionHydrator({

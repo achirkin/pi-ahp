@@ -36,7 +36,7 @@ import { AhpHost } from "../src/core/host.ts";
 import { ChatDriver, type PiBackend } from "../src/pi/chat-driver.ts";
 import { userTurnStarted } from "../src/pi/event-mapper.ts";
 import { MetadataStore } from "../src/pi/metadata-store.ts";
-import { SessionRegistry } from "../src/pi/session-registry.ts";
+import { SessionRegistry, type SessionRegistryOptions } from "../src/pi/session-registry.ts";
 import { serveWebSocket } from "../src/transport/websocket.ts";
 import { must, turnError } from "./support/assertions.ts";
 import { eventually } from "./support/async.ts";
@@ -164,7 +164,7 @@ interface Fixture {
 	close(): Promise<void>;
 }
 
-async function startFixture(): Promise<Fixture> {
+async function startFixture(prepareMessage?: SessionRegistryOptions["prepareMessage"]): Promise<Fixture> {
 	const metadataDir = mkdtempSync(join(tmpdir(), "pi-ahp-driver-metadata-"));
 	const host = new AhpHost({ serverInfo: { name: "pi-ahp", version: "test" } });
 	installRootChannel(host, []);
@@ -174,6 +174,7 @@ async function startFixture(): Promise<Fixture> {
 		metadata: new MetadataStore(metadataDir),
 		createBackend: () => backend,
 		createSessionManager: inMemorySessionManagerFactory,
+		...(prepareMessage ? { prepareMessage } : {}),
 	});
 	host.serve({
 		sessions: {
@@ -272,6 +273,34 @@ describe("chat driver", () => {
 		await eventually("the attachment-expanded prompt to reach the backend", () => backend.prompts.includes(expected));
 		assert.equal(backend.prompts.at(-1), expected);
 		assert.deepEqual(backend.promptImages.at(-1), [{ type: "image", data: ONE_PIXEL_PNG, mimeType: "image/png" }]);
+	});
+
+	it("gives the registry's prepareMessage the session's id and sends pi what it returns", async () => {
+		const seen: string[] = [];
+		const prepared = await startFixture((sessionId, message) => {
+			seen.push(sessionId);
+			return {
+				...message,
+				attachments: (message.attachments ?? []).map((a) => ("uri" in a ? { ...a, uri: "file:///moved/by/prepare.txt" } : a)),
+			};
+		});
+		try {
+			prepared.client.dispatch(prepared.chatChannel, {
+				type: ActionType.ChatTurnStarted,
+				turnId: "t-prepared",
+				startedAt: new Date().toISOString(),
+				message: {
+					text: "read it",
+					origin: { kind: MessageKind.User },
+					attachments: [{ type: MessageAttachmentKind.Resource, label: "dropped.txt", uri: "file:///pending/dropped.txt" }],
+				},
+			});
+			const expected = `read it\n\n${fileURLToPath("file:///moved/by/prepare.txt")}`;
+			await eventually("the rewritten prompt to reach the backend", () => prepared.backend.prompts.includes(expected));
+			assert.deepEqual(seen, [prepared.sessionChannel.split("/").at(-1)]);
+		} finally {
+			await prepared.close();
+		}
 	});
 
 	it("keeps the session catalog's chat summary in step", async () => {

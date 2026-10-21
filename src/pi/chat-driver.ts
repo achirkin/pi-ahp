@@ -76,6 +76,8 @@ export interface ChatDriverOptions {
 	readonly workingDirectory?: string;
 	/** Called with a turn id once that turn has finished, to anchor truncation. */
 	readonly recordTurnAnchor?: (turnId: string) => void;
+	/** Rewrites a message just before it goes to pi (files the user dropped in the chat move to the session's folder). */
+	readonly prepareMessage?: (message: Message) => Message;
 	readonly log?: (message: string) => void;
 }
 
@@ -97,6 +99,7 @@ export class ChatDriver {
 	/** Used to render tool paths relative to the workspace in activity strings. */
 	readonly #workingDirectory: string | undefined;
 	readonly #recordTurnAnchor: ((turnId: string) => void) | undefined;
+	readonly #prepareMessage: ((message: Message) => Message) | undefined;
 	readonly #log: ((message: string) => void) | undefined;
 	readonly #unsubscribe: () => void;
 
@@ -126,6 +129,7 @@ export class ChatDriver {
 		this.#backend = options.backend;
 		this.#workingDirectory = options.workingDirectory;
 		this.#recordTurnAnchor = options.recordTurnAnchor;
+		this.#prepareMessage = options.prepareMessage;
 		this.#log = options.log;
 		this.#unsubscribe = options.backend.subscribe((event) => {
 			this.#onAgentEvent(event);
@@ -255,7 +259,7 @@ export class ChatDriver {
 			const cancellation = this.#cancellation;
 			if (cancellation) await cancellation;
 			if (signal?.aborted) return;
-			const input = messageInputForPi(message);
+			const input = messageInputForPi(this.#prepareMessage ? this.#prepareMessage(message) : message);
 			await this.#backend.steer(input.text, input.images, signal);
 		} catch (error) {
 			this.#log?.(`steer failed: ${String(error)}`);
@@ -299,7 +303,7 @@ export class ChatDriver {
 				}
 				if (this.#quiescence) await this.#quiescence.wait;
 				if (this.#run !== run || this.#quiesced || run.abort.signal.aborted) return;
-				const input = messageInputForPi(message);
+				const input = messageInputForPi(this.#prepareMessage ? this.#prepareMessage(message) : message);
 				// Pi can emit agent_settled before prompt() rejects; the Promise decides the final action.
 				await this.#backend.prompt(input.text, input.images, run.abort.signal);
 			} catch (error) {

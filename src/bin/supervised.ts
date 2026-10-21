@@ -7,7 +7,8 @@
  * Environment: PI_AHP_SUPERVISOR_SOCK (required) — the supervisor's unix socket.
  * Listeners: `--socket <path>` (WebSocket over a unix socket, e.g. code-server's
  * `--agent-host-bridge-path`), `--relay-socket <path>` (AHP as JSON lines over a unix socket, for a
- * relay) and, without either, `--host/--port` with AHP_TOKEN. The connection token for the
+ * relay), `--upload-socket <path>` with `--uploads-dir <path>` (HTTP over a unix socket: files the user drops on the editor's
+ * chat, see host/uploads.ts) and, without a socket, `--host/--port` with AHP_TOKEN. The connection token for the
  * WebSocket listeners is AHP_TOKEN or VSCODE_AGENT_HOST_BRIDGE_CONNECTION_TOKEN.
  * The models are discovered in this process from pi's own files (settings, models.json, extensions), as an embedded
  * pi-ahp does. Listing needs no credential: a provider's `apiKey` command (the Spark's `!cat /run/spark/llm/token`) is
@@ -21,6 +22,7 @@ import { getAhpDir } from "../core/ahp-dir.ts";
 import { pathToFileUri } from "../core/uri.ts";
 import { VERSION } from "../host/serve.ts";
 import { createPiHost, type PiHost } from "../host/pi-host.ts";
+import { UploadStore } from "../host/uploads.ts";
 import { MetadataStore } from "../pi/metadata-store.ts";
 import { createDefaultPiSessionStorage } from "../pi/session-storage.ts";
 import { serveLineSocket } from "../supervisor/line-transport.ts";
@@ -40,7 +42,7 @@ function flagValue(args: string[], flag: string): string | undefined {
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 	if (args.includes("--help") || args.includes("-h")) {
-		log("usage: pi-ahp-supervised [--socket <path>] [--relay-socket <path>] [--host <addr>] [--port <n>] [--cwd <path>] [--check]  (env: PI_AHP_SUPERVISOR_SOCK, AHP_TOKEN)");
+		log("usage: pi-ahp-supervised [--socket <path>] [--relay-socket <path>] [--upload-socket <path> --uploads-dir <path>] [--host <addr>] [--port <n>] [--cwd <path>] [--check]  (env: PI_AHP_SUPERVISOR_SOCK, AHP_TOKEN)");
 		process.exit(0);
 	}
 	if (args.includes("--check")) {
@@ -64,6 +66,14 @@ async function main(): Promise<void> {
 	const port = Number(flagValue(args, "--port") ?? process.env.AHP_PORT ?? 0);
 	const connectionToken = process.env.AHP_TOKEN ?? process.env.VSCODE_AGENT_HOST_BRIDGE_CONNECTION_TOKEN ?? "";
 
+	const uploadSocket = flagValue(args, "--upload-socket");
+	const uploadsDir = flagValue(args, "--uploads-dir");
+	if (Boolean(uploadSocket) !== Boolean(uploadsDir)) {
+		log("--upload-socket and --uploads-dir go together");
+		process.exit(1);
+	}
+	const uploads = uploadsDir ? new UploadStore(resolve(uploadsDir), log) : undefined;
+
 	const supervisor = new SupervisorSocket(supervisorPath, log);
 	const metadata = new MetadataStore(getAhpDir());
 	// The backends read the model list through this once the host exists; they only run later.
@@ -76,8 +86,19 @@ async function main(): Promise<void> {
 		metadata,
 		log,
 		createBackend: (session) => new SupervisorBackend(session, supervisor, () => piHost?.models() ?? [], log),
+		...(uploads ? { prepareMessage: (sessionId, message) => uploads.adopt(sessionId, message) } : {}),
 	});
 	const { host: ahpHost, changesets, terminals, watches, webhooks } = piHost;
+	let uploadServer: { close(): Promise<void> } | undefined;
+	if (uploads && uploadSocket) {
+		// A deleted session takes its uploads along; what was deleted while this host was down goes now.
+		piHost.sessions.onSessionDeletionCommitted((sessionId) => uploads.removeSession(sessionId));
+		uploadServer = await uploads.serve(uploadSocket);
+		log(`listening uploads ${uploadSocket}`);
+		void uploads
+			.sweep(async (sessionId) => (await piHost?.catalogue.findSessionFile(sessionId)) !== undefined)
+			.catch((error: unknown) => log(`upload sweep failed: ${String(error)}`));
+	}
 
 	const socketPath = flagValue(args, "--socket");
 	const relayPath = flagValue(args, "--relay-socket");
@@ -102,7 +123,7 @@ async function main(): Promise<void> {
 	}
 
 	const stop = (): void => {
-		void Promise.all(servers.map((server) => server.close())).then(async () => {
+		void Promise.all([...servers.map((server) => server.close()), uploadServer?.close()]).then(async () => {
 			terminals.shutdown();
 			webhooks.dispose();
 			await Promise.all([changesets.dispose(), watches.dispose()]);
