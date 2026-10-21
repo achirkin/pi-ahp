@@ -9,9 +9,9 @@
  * `--agent-host-bridge-path`), `--relay-socket <path>` (AHP as JSON lines over a unix socket, for a
  * relay) and, without either, `--host/--port` with AHP_TOKEN. The connection token for the
  * WebSocket listeners is AHP_TOKEN or VSCODE_AGENT_HOST_BRIDGE_CONNECTION_TOKEN.
- * The models come from a pi child (`get_available_models`: the child is what holds the credentials). Right after
- * the listeners open the host attaches one throwaway session for them and releases it; the clients' handshakes wait
- * for that, so every client sees the list from its first message. If no pi answers the host exits.
+ * The models are discovered in this process from pi's own files (settings, models.json, extensions), as an embedded
+ * pi-ahp does. Listing needs no credential: a provider's `apiKey` command (the Spark's `!cat /run/spark/llm/token`) is
+ * run by the pi child per request, never here. The default model and thinking level come from pi's settings.
  * `--check` loads the host code and exits, so a packager can refuse to publish a build that cannot start.
  */
 
@@ -24,7 +24,7 @@ import { createPiHost, type PiHost } from "../host/pi-host.ts";
 import { MetadataStore } from "../pi/metadata-store.ts";
 import { createDefaultPiSessionStorage } from "../pi/session-storage.ts";
 import { serveLineSocket } from "../supervisor/line-transport.ts";
-import { listModels, SupervisorBackend } from "../supervisor/supervisor-backend.ts";
+import { SupervisorBackend } from "../supervisor/supervisor-backend.ts";
 import { SupervisorSocket } from "../supervisor/supervisor-client.ts";
 import { type RunningServer, serveWebSocket } from "../transport/websocket.ts";
 
@@ -66,18 +66,9 @@ async function main(): Promise<void> {
 
 	const supervisor = new SupervisorSocket(supervisorPath, log);
 	const metadata = new MetadataStore(getAhpDir());
-	// The backends read and fill the model list through this once the host exists; they only run later.
+	// The backends read the model list through this once the host exists; they only run later.
 	let piHost: PiHost | undefined;
-	// Settles once the models are known: the sockets open first (the Spark waits for them while it also serves the
-	// supervisor socket this host asks for the models), and no client is answered before the list is in.
-	let modelsKnown!: () => void;
-	const ready = new Promise<void>((resolveReady) => {
-		modelsKnown = resolveReady;
-	});
 	piHost = await createPiHost({
-		ready,
-		// Nothing is discovered here: pi's own discovery would list only what this process's environment can authenticate.
-		modelRuntime: { getAvailable: async () => [] },
 		serverInfo: { name: "pi-ahp-supervised", version: VERSION },
 		defaultDirectory: pathToFileUri(workingDirectory),
 		workingDirectory,
@@ -122,19 +113,7 @@ async function main(): Promise<void> {
 	process.on("SIGINT", stop);
 	process.on("SIGTERM", stop);
 
-	// The models are what a pi child lists (see listModels), and clients take the list at their handshake, which waits
-	// for `ready`: one pi is started now, a throwaway session released at once. Without models the host exits.
-	const probe = await supervisor.request("attach", { path: workingDirectory, new: true });
-	const probeSession = String(probe.session);
-	try {
-		const state = probe.state as { model?: { provider?: string; id?: string }; thinkingLevel?: string } | undefined;
-		const current = state?.model?.provider && state.model.id ? { provider: state.model.provider, id: state.model.id, ...(state.thinkingLevel ? { thinkingLevel: state.thinkingLevel } : {}) } : undefined;
-		piHost.setModels(await listModels(supervisor, probeSession), current);
-	} finally {
-		await supervisor.request("detach", { session: probeSession }).catch((error: unknown) => log(`releasing the model probe failed: ${String(error)}`));
-	}
-	log(`models: ${piHost.models().length} from a pi child`);
-	modelsKnown();
+	log(`models: ${piHost.models().length}`);
 }
 
 void main().catch((error: unknown) => {

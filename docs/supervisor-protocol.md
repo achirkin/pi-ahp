@@ -29,8 +29,8 @@ while attached; a running turn then fails with "pi stopped while the turn was ru
 Session files, the catalogue and history are read from pi's directory (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`) exactly as for
 an embedded pi, because the files live on the same machine.
 
-The model list is not: before it listens, the host attaches a throwaway session (`attach` with `new: true`), asks its child
-`{"type": "get_available_models"}` through `call`, takes `data.state.model` and `thinkingLevel` of the attach as what a new session
-runs on, and detaches. pi lists a provider only when its credentials resolve, and the child is the process that has them. An answer
-that is not `success` with `data.models` stops the host from starting. (`attach` accepts `new: true` instead of `session`; the reply
-carries the session id as `data.session`.)
+The model list is read the same way, in the host's own process (`models.json`, extensions, and the default provider, model and
+thinking level of `settings.json`). Listing runs no `apiKey` command, so the host needs no credential: a provider whose key is a
+command (the Spark's `!cat /run/spark/llm/token`) has it run by the pi child, per request. A session still starts on the model its
+child reports in the `attach` reply (`data.state.model`, `thinkingLevel`). (`attach` accepts `new: true` instead of `session`; the
+reply carries the session id as `data.session`.)

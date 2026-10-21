@@ -23,19 +23,6 @@ interface Waiter {
 /** The models the host advertises right now (`PiHost.models`). */
 export type ModelList = () => readonly Model<never>[];
 
-/**
- * The models a supervisor's pi child can use (pi's `get_available_models`). pi lists a provider only when its credentials
- * resolve, and the child is the process that has them, so the host asks a child rather than reading pi's files itself.
- */
-export async function listModels(socket: SupervisorSocket, session: string): Promise<Model<never>[]> {
-	const reply = await socket.request("call", { session, command: { type: "get_available_models" } });
-	const response = reply.response as { success?: boolean; error?: string; data?: { models?: Model<never>[] } } | undefined;
-	if (!response?.success || !Array.isArray(response.data?.models)) {
-		throw new Error(`pi did not list its models: ${response?.error ?? "no answer"}`);
-	}
-	return response.data.models;
-}
-
 export class SupervisorBackend implements PiBackend {
 	private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
 	private readonly socket: SupervisorSocket;

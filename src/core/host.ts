@@ -187,11 +187,6 @@ export interface HostOptions {
 	 */
 	readonly completionTriggerCharacters?: readonly string[];
 	readonly replayBufferCapacity?: number;
-	/**
-	 * `initialize` and `reconnect` wait for this before they are answered, so a host can listen at once and still
-	 * advertise what it only learns afterwards. If it never settles, clients never get past the handshake.
-	 */
-	readonly ready?: Promise<unknown>;
 	readonly log?: (message: string) => void;
 }
 
@@ -422,8 +417,6 @@ export class AhpHost {
 		if (handshake && connection.clientId) {
 			throw new ProtocolError(JsonRpcErrorCodes.InvalidRequest, "Connection is already initialized");
 		}
-		// A client takes what the host advertises when it handshakes, so the handshake waits until the host is ready.
-		if (handshake) await this.#options.ready;
 		if (!handshake && request.method !== "ping" && !connection.clientId) {
 			throw new ProtocolError(JsonRpcErrorCodes.InvalidRequest, "initialize or reconnect must be the first request");
 		}

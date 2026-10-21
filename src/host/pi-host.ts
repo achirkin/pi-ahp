@@ -5,9 +5,9 @@
 
 import { clampThinkingLevel, type Model } from "@earendil-works/pi-ai";
 import { createAgentSessionServices, type ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { ActionType, type CreateSessionParams, type ModelSelection, type URI } from "@microsoft/agent-host-protocol";
+import { type CreateSessionParams, type ModelSelection, type URI } from "@microsoft/agent-host-protocol";
 import { installRootChannel } from "../channels/root.ts";
-import { ROOT_CHANNEL, sessionUri } from "../core/channels.ts";
+import { sessionUri } from "../core/channels.ts";
 import { AhpHost, type HostOptions } from "../core/host.ts";
 import { ChangesetService } from "../pi/changeset-service.ts";
 import { CompletionService, MENTION_TRIGGER } from "../pi/completions.ts";
@@ -68,24 +68,11 @@ export interface PiHost {
 	readonly webhooks: { dispose(): void };
 	/** The models currently advertised to clients. */
 	readonly models: () => readonly Model<never>[];
-	/**
-	 * Replaces the advertised list and publishes it to clients (`root/agentsChanged`) when it differs. For a host whose
-	 * models are learned from a pi child (see src/supervisor), not read from pi's files. `current` is the model and
-	 * thinking level a new session starts on; without it the settings' default (or the first model) is used.
-	 */
-	readonly setModels: (models: readonly Model<never>[], current?: ModelChoice) => void;
-}
-
-/** A model and the thinking level a session runs on, as pi names them. */
-export interface ModelChoice {
-	readonly provider: string;
-	readonly id: string;
-	readonly thinkingLevel?: string;
 }
 
 /**
  * Builds the host and registers every supported channel. The model list is a
- * startup snapshot until `setModels` is called.
+ * startup snapshot.
  */
 export async function createPiHost(options: PiHostOptions): Promise<PiHost> {
 	const workingDirectory = options.workingDirectory ?? process.cwd();
@@ -117,14 +104,11 @@ export async function createPiHost(options: PiHostOptions): Promise<PiHost> {
 	// A user with no configured provider still gets a usable host — they just
 	// see an agent with no models, which is the honest representation.
 	let models: readonly Model<never>[] = (await modelRuntime.getAvailable().catch(() => [])) as never;
-	let publishedAgents = JSON.stringify([buildAgentInfo(models)]);
 	installRootChannel(host, [buildAgentInfo(models)]);
 
-	let current: ModelChoice | undefined;
-	// Computed per session from the current list and settings, so `setModels` takes effect.
 	const fallbackSelection = (): ModelSelection | undefined => {
-		const configuredProvider = current?.provider ?? settingsManager?.getDefaultProvider();
-		const configuredId = current?.id ?? settingsManager?.getDefaultModel();
+		const configuredProvider = settingsManager?.getDefaultProvider();
+		const configuredId = settingsManager?.getDefaultModel();
 		const configured = models.find((model) => model.provider === configuredProvider && model.id === configuredId);
 		const fallback = configured ?? models[0];
 		if (!fallback) {
@@ -132,22 +116,10 @@ export async function createPiHost(options: PiHostOptions): Promise<PiHost> {
 		}
 		const thinking = clampThinkingLevel(
 			fallback,
-			configured ? ((current?.thinkingLevel ?? settingsManager?.getDefaultThinkingLevel() ?? "medium") as never) : "medium",
+			configured ? ((settingsManager?.getDefaultThinkingLevel() ?? "medium") as never) : "medium",
 		);
 		return { id: modelSelectionId(fallback), config: { [THINKING_CONFIG_KEY]: thinking } };
 	};
-	const setModels = (next: readonly Model<never>[], choice?: ModelChoice): void => {
-		models = next;
-		current = choice;
-		const agents = [buildAgentInfo(next)];
-		const serialized = JSON.stringify(agents);
-		if (serialized === publishedAgents) {
-			return;
-		}
-		publishedAgents = serialized;
-		host.dispatchServerAction(ROOT_CHANNEL, { type: ActionType.RootAgentsChanged, agents } as never);
-	};
-
 	const catalogue = options.sessionStorage.catalogue;
 	const resourcePaths = new ResourcePathPolicy(options.resourceRoots);
 	const parcelPool = new ParcelWatchPool();
@@ -264,5 +236,5 @@ export async function createPiHost(options: PiHostOptions): Promise<PiHost> {
 		},
 	});
 
-	return { host, sessions, catalogue, changesets, watches, terminals, webhooks, models: () => models, setModels };
+	return { host, sessions, catalogue, changesets, watches, terminals, webhooks, models: () => models };
 }
