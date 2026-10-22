@@ -34,6 +34,8 @@ export class SupervisorBackend implements PiBackend {
 	private detached = false;
 	private selection: ModelSelection | undefined;
 	private readonly detachForward: () => void;
+	/** The folders the host that runs pi last accepted for this session, to send changes only. */
+	private acceptedFolders: string[] | undefined;
 
 	constructor(session: LiveSession, socket: SupervisorSocket, models: ModelList, log?: (message: string) => void) {
 		this.session = session;
@@ -54,8 +56,33 @@ export class SupervisorBackend implements PiBackend {
 		});
 	}
 
+	/**
+	 * Tells the host that runs pi which folders this session works in, when the client declared or changed them: the host
+	 * checks every folder against its path guard and records the list (nothing is granted from a session file). A refusal
+	 * is the turn's visible error, and the declared set goes back to what the host accepted before.
+	 */
+	private async syncFolders(): Promise<void> {
+		const folders = this.session.folders;
+		if (!folders || sameList(folders, this.acceptedFolders)) return;
+		try {
+			const data = await this.socket.request("folders", {
+				session: this.session.sessionId,
+				folders,
+				...(this.session.createdHere ? { create: true } : {}),
+			});
+			const accepted = Array.isArray(data.folders) ? (data.folders as unknown[]).filter((f): f is string => typeof f === "string") : folders;
+			this.acceptedFolders = accepted;
+			if (!sameList(accepted, folders)) this.session.revertFolders?.(accepted);
+		} catch (error) {
+			if (this.acceptedFolders) this.session.revertFolders?.(this.acceptedFolders);
+			throw error;
+		}
+	}
+
 	async ensure(): Promise<void> {
-		if (this.attached || this.detached) return;
+		if (this.detached) return;
+		await this.syncFolders();
+		if (this.attached) return;
 		const data = await this.socket.request("attach", { path: this.session.workingDirectory, session: this.session.sessionId });
 		this.attached = true;
 		const state = data.state as { model?: { provider?: string; id?: string }; thinkingLevel?: string } | undefined;
@@ -157,4 +184,8 @@ function command(type: string, text: string, images?: ImageContent[]): Record<st
 		.filter((image) => typeof image?.data === "string")
 		.map((image) => ({ type: "image", mimeType: image.mimeType ?? "image/png", data: image.data }));
 	return { type, message: text, ...(list.length ? { images: list } : {}) };
+}
+
+function sameList(a: readonly string[], b: readonly string[] | undefined): boolean {
+	return b !== undefined && a.length === b.length && a.every((value, index) => value === b[index]);
 }

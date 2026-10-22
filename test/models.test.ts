@@ -99,9 +99,9 @@ describe("model mapping", () => {
 
 		assert.equal(agent.provider, PI_PROVIDER);
 		assert.equal(agent.models.length, 2);
-		// No capabilities declared: one chat, one working directory. Their
-		// absence is what tells a client not to attempt those calls.
-		assert.equal(agent.capabilities, undefined);
+		// The only capability declared is several working directories per session, with the first one fixed. Everything else
+		// (several chats per session, moving a primary) stays undeclared, which tells a client not to attempt those calls.
+		assert.deepEqual(agent.capabilities, { multipleWorkingDirectories: { immutablePrimary: true } });
 		assert.deepEqual(agent.protectedResources, []);
 		assert.equal(agent.customizations, undefined);
 		assertValid("state", "AgentInfo", agent);

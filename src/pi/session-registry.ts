@@ -35,7 +35,7 @@ import { notifySessionAdded, notifySessionRemoved, notifySessionSummaryChanged }
 import { aggregateSessionChats, initialSessionState, sessionSummaryOf } from "../channels/session.ts";
 import { chatUri, ROOT_CHANNEL, sessionIdFromUri } from "../core/channels.ts";
 import type { AhpHost, ChatTruncationRouter, SessionMetadataActionRouter } from "../core/host.ts";
-import { fileUriToPath } from "../core/uri.ts";
+import { fileUriToPath, pathToFileUri } from "../core/uri.ts";
 import { ProtocolError } from "../protocol/errors.ts";
 import { ChatDriver, type PiBackend } from "./chat-driver.ts";
 import { messageRejectionReason } from "./message-input.ts";
@@ -75,6 +75,20 @@ export interface LiveSession {
 	 * leaf pointer as live turns complete.
 	 */
 	readonly turnAnchors: Map<string, string>;
+	/**
+	 * The folders the client declared for this session: those of its `createSession` and its later
+	 * `session/workingDirectory*` actions, as paths, the first being `workingDirectory`. `undefined` for a session loaded
+	 * from disk that no client has changed: its one folder is only what the file's header says, and nothing is granted
+	 * from that. The backend hands them to the host that runs pi (see supervisor-backend.ts).
+	 */
+	folders?: string[] | undefined;
+	/** True for a session this host created for a client; only such a session may start with no grant on the host. */
+	readonly createdHere?: boolean;
+	/**
+	 * Called by the backend when the host that runs pi refused the folders: the state goes back to what that host last
+	 * accepted (the refused directories leave the set), so the next message is not refused for the same reason.
+	 */
+	revertFolders?: (accepted: readonly string[]) => void;
 }
 
 /** Creates the agent backend for a session. Absent in storage-only mode. */
@@ -89,12 +103,9 @@ function unsupportedClientActionReason(action: StateAction): string | undefined 
 		case ActionType.SessionActiveClientSet:
 		case ActionType.SessionActiveClientRemoved:
 			return "This host does not accept active clients";
-		case ActionType.SessionWorkingDirectorySet:
-		case ActionType.SessionWorkingDirectoryRemoved:
-		case ActionType.SessionWorkingDirectoryReplaced:
 		case ActionType.ChatWorkingDirectorySet:
 		case ActionType.ChatWorkingDirectoryRemoved:
-			return "This agent does not support changing working directories";
+			return "A chat works in all the folders of its session; change the session's folders instead";
 		case ActionType.SessionCustomizationToggled:
 			return "This host does not support customizations";
 		case ActionType.SessionMcpServerStartRequested:
@@ -140,12 +151,7 @@ function sessionMetadataFlag(action: StateAction): SessionMetadataFlag | undefin
 
 export interface CreateSessionRequest {
 	readonly channel: URI;
-	/**
-	 * A set in the protocol, but this host does not declare
-	 * `multipleWorkingDirectories`, which is what forbids a client from sending
-	 * more than one. Anything past the first is ignored rather than refused —
-	 * the session still runs, in the directory the client asked for first.
-	 */
+	/** A set in the protocol; the first is the primary (pi's working directory), the others are peers. */
 	readonly workingDirectories?: readonly URI[];
 	readonly provider?: string;
 }
@@ -409,6 +415,11 @@ export class SessionRegistry {
 		const workingDirectory = requested
 			? fileUriToPath(requested)
 			: (this.#options.defaultWorkingDirectory ?? process.cwd());
+		const folders = [workingDirectory];
+		for (const extra of request.workingDirectories?.slice(1) ?? []) {
+			const folder = fileUriToPath(extra);
+			if (!folders.includes(folder)) folders.push(folder);
+		}
 
 		const title = NEW_SESSION_TITLE;
 		const createdAt = new Date().toISOString();
@@ -416,7 +427,8 @@ export class SessionRegistry {
 		// manager still owns the target directory and in-memory entry tree now.
 		const sessionManager = this.#options.createSessionManager(workingDirectory, sessionId);
 		// A provider-alias URI still needs the session reducer.
-		this.#host.store.create(uri, initialSessionState(PI_PROVIDER, title, workingDirectory), "session");
+		const initial = initialSessionState(PI_PROVIDER, title, workingDirectory);
+		this.#host.store.create(uri, { ...initial, workingDirectories: folders.map(pathToFileUri) }, "session");
 		const chatChannel = installDefaultChat(this.#host, uri, sessionId, title, this.#options.defaultSelection?.());
 
 		const session: LiveSession = {
@@ -427,7 +439,10 @@ export class SessionRegistry {
 			chatChannel,
 			createdAt,
 			turnAnchors: new Map(),
+			folders,
+			createdHere: true,
 		};
+		session.revertFolders = (accepted) => this.#revertFolders(session, accepted);
 		this.#track(session);
 		this.#notifySessionAvailableToAll(session);
 
@@ -696,6 +711,10 @@ export class SessionRegistry {
 		switch (action.type) {
 			case ActionType.SessionTitleChanged:
 				return typeof action.title === "string" ? undefined : "A session title must be a string";
+			case ActionType.SessionWorkingDirectorySet:
+			case ActionType.SessionWorkingDirectoryRemoved:
+			case ActionType.SessionWorkingDirectoryReplaced:
+				return this.#workingDirectoryActionRejection(channel, action);
 			case ActionType.SessionIsArchivedChanged:
 				if (typeof action.isArchived !== "boolean") return "The archive flag must be a boolean";
 				return sessionIdFromUri(channel, [PI_PROVIDER]) ? undefined : "This session is unavailable";
@@ -816,7 +835,78 @@ export class SessionRegistry {
 		session.driver?.handleClientAction(channel, action);
 	}
 
+	/**
+	 * What the host that runs pi will be asked to grant is checked there (the path guard), on the next message; here only
+	 * the shape is: a `file:` URI of an absolute path, and the primary (the first folder) stays as it is.
+	 */
+	#workingDirectoryActionRejection(channel: URI, action: StateAction): string | undefined {
+		const session = this.#sessions.get(channel);
+		const uris: string[] = [];
+		if (action.type === ActionType.SessionWorkingDirectorySet || action.type === ActionType.SessionWorkingDirectoryRemoved) {
+			uris.push(action.directory);
+		} else if (action.type === ActionType.SessionWorkingDirectoryReplaced) {
+			uris.push(action.directory, action.replacement);
+		}
+		for (const uri of uris) {
+			if (typeof uri !== "string" || !uri.startsWith("file:///")) return "A working directory must be a file: URI of an absolute path";
+			try {
+				fileUriToPath(uri);
+			} catch {
+				return "A working directory must be a file: URI of an absolute path";
+			}
+		}
+		if (!session) return undefined;
+		const primary = pathToFileUri(session.workingDirectory);
+		if (action.type === ActionType.SessionWorkingDirectoryRemoved && action.directory === primary) {
+			return "The first folder of a chat is where pi runs and cannot be removed; start a chat in the other folder";
+		}
+		if (action.type === ActionType.SessionWorkingDirectoryReplaced && action.directory === primary) {
+			return "The first folder of a chat is where pi runs and cannot be replaced; start a chat in the other folder";
+		}
+		return undefined;
+	}
+
+	/** Mirrors an accepted working-directory action into `session.folders`, the set the host that runs pi is asked for. */
+	#trackFolders(session: LiveSession): void {
+		const state = this.#host.store.get(session.uri) as SessionState | undefined;
+		// The reducer has already applied the action: the state is the new set (a session loaded from disk starts from the
+		// one folder its header names, which a client's change then makes explicit).
+		const directories = state?.workingDirectories;
+		if (!directories) return;
+		session.folders = directories.map((uri) => fileUriToPath(uri));
+	}
+
+	#revertFolders(session: LiveSession, accepted: readonly string[]): void {
+		const state = this.#host.store.get(session.uri) as SessionState | undefined;
+		const current = (state?.workingDirectories ?? []).map((uri) => fileUriToPath(uri));
+		for (const folder of current) {
+			if (!accepted.includes(folder)) {
+				this.#host.dispatchServerAction(session.uri, {
+					type: ActionType.SessionWorkingDirectoryRemoved,
+					directory: pathToFileUri(folder),
+				});
+			}
+		}
+		for (const folder of accepted) {
+			if (!current.includes(folder)) {
+				this.#host.dispatchServerAction(session.uri, {
+					type: ActionType.SessionWorkingDirectorySet,
+					directory: pathToFileUri(folder),
+				});
+			}
+		}
+		session.folders = [...accepted];
+	}
+
 	#handleSessionAction(session: LiveSession, action: StateAction): void {
+		if (
+			action.type === ActionType.SessionWorkingDirectorySet ||
+			action.type === ActionType.SessionWorkingDirectoryRemoved ||
+			action.type === ActionType.SessionWorkingDirectoryReplaced
+		) {
+			this.#trackFolders(session);
+			return;
+		}
 		if (action.type !== ActionType.SessionTitleChanged) {
 			return;
 		}

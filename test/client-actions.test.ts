@@ -192,16 +192,9 @@ describe("pi client-action policy", () => {
 	it("rejects capabilities pi does not implement", async () => {
 		const { session, chat } = await createChannels();
 		const cases: RejectionCase[] = [
-			...rejected(session, /changing working directories/, [
-				{ type: ActionType.SessionWorkingDirectorySet, directory: "file:///tmp/other" },
-				{ type: ActionType.SessionWorkingDirectoryRemoved, directory: `file://${workspace}` },
-				{
-					type: ActionType.SessionWorkingDirectoryReplaced,
-					directory: `file://${workspace}`,
-					replacement: "file:///tmp/other",
-				},
-			]),
-			...rejected(chat, /changing working directories/, [
+			// A chat uses the folders of its session; the session's own folders are changed with the session actions
+			// (test/working-directories.test.ts).
+			...rejected(chat, /all the folders of its session/, [
 				{ type: ActionType.ChatWorkingDirectorySet, directory: "file:///tmp/other" },
 				{ type: ActionType.ChatWorkingDirectoryRemoved, directory: `file://${workspace}` },
 			]),

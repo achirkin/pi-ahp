@@ -108,9 +108,11 @@ export function toSessionModelInfo(model: Model<never>): SessionModelInfo {
  * level. Keeping the empty list explicit also distinguishes that settled state
  * for clients that conservatively treat an omitted field as unresolved.
  *
- * No `capabilities`: this host serves one chat per session and one working
- * directory, so neither `multipleChats` nor `multipleWorkingDirectories` is
- * declared. Their absence is what tells a client not to attempt those calls.
+ * Capabilities: one chat per session, so `multipleChats` is not declared (its
+ * absence tells a client not to attempt those calls). `multipleWorkingDirectories`
+ * is: a chat can work in several folders (the editor's workspace folders, Add
+ * Folder to Workspace). The first is the immutable primary: pi's own working
+ * directory, which the session file and the supervisor key on.
  * Vision is model-specific instead and is published on each model above.
  */
 export function buildAgentInfo(models: readonly Model<never>[]): AgentInfo {
@@ -120,5 +122,6 @@ export function buildAgentInfo(models: readonly Model<never>[]): AgentInfo {
 		description: "pi coding agent",
 		models: models.map(toSessionModelInfo),
 		protectedResources: [],
+		capabilities: { multipleWorkingDirectories: { immutablePrimary: true } },
 	};
 }
