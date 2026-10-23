@@ -63,7 +63,7 @@ describe("uploads", () => {
 		const bytes = Buffer.from("hello\n");
 		const reply = await put(socket, "/upload?name=notes%20v1.txt", bytes);
 		assert.equal(reply.status, 201);
-		assert.equal(reply.headers["x-spark-upload"], "1");
+		assert.equal(reply.headers["x-ahp-upload"], "1");
 		// the page reads the reply without an HTTP library: a length, not chunks
 		assert.equal(reply.headers["content-length"], String(Buffer.byteLength(reply.body)));
 		assert.equal(reply.headers["transfer-encoding"], undefined);
@@ -84,7 +84,7 @@ describe("uploads", () => {
 		assert.equal(wrongMethod, 405);
 		const elsewhere = await put(socket, "/other", Buffer.from("x"));
 		assert.equal(elsewhere.status, 405);
-		assert.equal(elsewhere.headers["x-spark-upload"], "1");
+		assert.equal(elsewhere.headers["x-ahp-upload"], "1");
 		assert.equal(elsewhere.headers["content-length"], String(Buffer.byteLength(elsewhere.body)));
 		const huge = await put(socket, "/upload?name=big", Buffer.alloc(0), { "content-length": MAX_UPLOAD_BYTES + 1 });
 		assert.equal(huge.status, 413);
@@ -97,7 +97,7 @@ describe("uploads", () => {
 		const first = JSON.parse((await put(socket, "/upload?name=a.txt", Buffer.from("A"))).body).path as string;
 		const second = JSON.parse((await put(socket, "/upload?name=b%20c.md", Buffer.from("B"))).body).path as string;
 		const asFile = `file://${first}`;
-		const asRemote = `vscode-remote://spark.home${second.split("/").map(encodeURIComponent).join("/")}`;
+		const asRemote = `vscode-remote://host.example${second.split("/").map(encodeURIComponent).join("/")}`;
 		const adopted = store.adopt(SESSION, messageWith(asFile, asRemote, "file:///etc/hostname"));
 		const uris = (adopted.attachments as unknown as { uri: string }[]).map((a) => a.uri);
 		assert.equal(uris[0], `file://${join(store.dir, SESSION, first.split("/").at(-2) as string, "a.txt")}`);

@@ -55,7 +55,7 @@ export class UploadStore {
 				res.writeHead(status, {
 					"content-type": type,
 					"content-length": Buffer.byteLength(body),
-					"x-spark-upload": "1",
+					"x-ahp-upload": "1",
 					connection: "close",
 				});
 				res.end(body);

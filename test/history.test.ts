@@ -10,7 +10,7 @@ import {
 	TurnState,
 } from "@microsoft/agent-host-protocol";
 import { COMPACTION_NOTICE } from "../src/pi/compaction-notice.ts";
-import { CLEAR_ALL_ANCHOR, rebuildHistoryFromSession } from "../src/pi/history.ts";
+import { AGENT_ENTRY, CLEAR_ALL_ANCHOR, rebuildHistoryFromSession } from "../src/pi/history.ts";
 import { initialTurnsWindow, loadOlderTurns } from "../src/pi/turn-paging.ts";
 import { must } from "./support/assertions.ts";
 
@@ -38,6 +38,29 @@ function assistant(
 }
 
 describe("rebuilding a user-visible branch", () => {
+	it("gives each turn the agent the session file records, written before or after its user message", () => {
+		const manager = session();
+		const plan = "file:///agents/review.md";
+		user(manager, "first, in Agent");
+		assistant(manager, "a1");
+		// the extension writes the agent when the run starts: here after the user message of its turn
+		user(manager, "second, in the review agent");
+		manager.appendCustomEntry(AGENT_ENTRY, { agent: plan });
+		assistant(manager, "a2");
+		user(manager, "third, still the review agent: no new entry");
+		assistant(manager, "a3");
+		// and here before the user message
+		manager.appendCustomEntry(AGENT_ENTRY, {});
+		user(manager, "fourth, back in Agent");
+		assistant(manager, "a4");
+
+		const { turns } = rebuildHistoryFromSession(manager);
+		assert.deepEqual(
+			turns.map((turn) => turn.message.agent?.uri),
+			[undefined, plan, plan, undefined],
+		);
+	});
+
 	it("restores a final failure and cancellation, including the final error part", () => {
 		const manager = session();
 		user(manager, "failed prompt");

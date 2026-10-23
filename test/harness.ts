@@ -19,7 +19,12 @@ import { MetadataStore } from "../src/pi/metadata-store.ts";
 import { PI_PROVIDER } from "../src/pi/provider.ts";
 import { PiSessionCatalogue } from "../src/pi/session-catalogue.ts";
 import { SessionHydrator } from "../src/pi/session-hydrator.ts";
-import { type BackendFactory, type SessionFileDeletionResult, SessionRegistry } from "../src/pi/session-registry.ts";
+import {
+	type BackendFactory,
+	type SessionCustomizer,
+	type SessionFileDeletionResult,
+	SessionRegistry,
+} from "../src/pi/session-registry.ts";
 import { type RunningServer, serveWebSocket } from "../src/transport/websocket.ts";
 import { persistentSessionManagerFactory } from "./support/session-storage.ts";
 
@@ -59,6 +64,8 @@ export async function startHarness(
 		workingDirectory?: string;
 		/** Backend for live session tests; omitted for storage-only sessions. */
 		createBackend?: BackendFactory;
+		/** Gives `Message.agent` and the customization actions a meaning. */
+		customizer?: SessionCustomizer;
 		/** Durable deletion boundary. */
 		deleteFile?: (path: string) => SessionFileDeletionResult | Promise<SessionFileDeletionResult>;
 		/** Durable session root; defaults to a fixture-owned temporary directory. */
@@ -88,6 +95,7 @@ export async function startHarness(
 			defaultWorkingDirectory: options.workingDirectory ?? process.cwd(),
 			createSessionManager: persistentSessionManagerFactory(sessionRoot),
 			...(options.createBackend ? { createBackend: options.createBackend } : {}),
+			...(options.customizer ? { customizer: options.customizer } : {}),
 			deleteFile:
 				options.deleteFile ??
 				((path) => {

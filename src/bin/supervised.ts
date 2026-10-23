@@ -11,8 +11,9 @@
  * chat, see host/uploads.ts) and, without a socket, `--host/--port` with AHP_TOKEN. The connection token for the
  * WebSocket listeners is AHP_TOKEN or VSCODE_AGENT_HOST_BRIDGE_CONNECTION_TOKEN.
  * The models are discovered in this process from pi's own files (settings, models.json, extensions), as an embedded
- * pi-ahp does. Listing needs no credential: a provider's `apiKey` command (the Spark's `!cat /run/spark/llm/token`) is
+ * pi-ahp does. Listing needs no credential: a provider's `apiKey` command (`!cat <file>`, say) is
  * run by the pi child per request, never here. The default model and thinking level come from pi's settings.
+ * `--plugin <module>` adds a deployment's own agents and toggles (src/plugin.ts).
  * `--check` loads the host code and exits, so a packager can refuse to publish a build that cannot start.
  */
 
@@ -26,6 +27,7 @@ import { UploadStore } from "../host/uploads.ts";
 import { MetadataStore } from "../pi/metadata-store.ts";
 import { createDefaultPiSessionStorage } from "../pi/session-storage.ts";
 import { serveLineSocket } from "../supervisor/line-transport.ts";
+import type { Plugin, PluginContext, PluginFactory } from "../plugin.ts";
 import { SupervisorBackend } from "../supervisor/supervisor-backend.ts";
 import { SupervisorSocket } from "../supervisor/supervisor-client.ts";
 import { type RunningServer, serveWebSocket } from "../transport/websocket.ts";
@@ -39,10 +41,16 @@ function flagValue(args: string[], flag: string): string | undefined {
 	return index >= 0 ? args[index + 1] : undefined;
 }
 
+async function loadPlugin(path: string, context: PluginContext): Promise<Plugin> {
+	const module = (await import(pathToFileUri(path))) as { default?: PluginFactory };
+	if (typeof module.default !== "function") throw new Error(`${path}: a plugin's default export is a function (see src/plugin.ts)`);
+	return module.default(context);
+}
+
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 	if (args.includes("--help") || args.includes("-h")) {
-		log("usage: pi-ahp-supervised [--socket <path>] [--relay-socket <path>] [--upload-socket <path> --uploads-dir <path>] [--host <addr>] [--port <n>] [--cwd <path>] [--check]  (env: PI_AHP_SUPERVISOR_SOCK, AHP_TOKEN)");
+		log("usage: pi-ahp-supervised [--socket <path>] [--relay-socket <path>] [--upload-socket <path> --uploads-dir <path>] [--plugin <module>] [--host <addr>] [--port <n>] [--cwd <path>] [--check]  (env: PI_AHP_SUPERVISOR_SOCK, AHP_TOKEN)");
 		process.exit(0);
 	}
 	if (args.includes("--check")) {
@@ -75,6 +83,10 @@ async function main(): Promise<void> {
 	const uploads = uploadsDir ? new UploadStore(resolve(uploadsDir), log) : undefined;
 
 	const supervisor = new SupervisorSocket(supervisorPath, log);
+	// A plugin adds a deployment's own agents and toggles (see plugin.ts). Without one this is a plain supervised host and
+	// `Message.agent` is refused.
+	const pluginPath = flagValue(args, "--plugin");
+	const plugin = pluginPath ? await loadPlugin(resolve(pluginPath), { args, supervisor, log }) : undefined;
 	const metadata = new MetadataStore(getAhpDir());
 	// The backends read the model list through this once the host exists; they only run later.
 	let piHost: PiHost | undefined;
@@ -85,10 +97,16 @@ async function main(): Promise<void> {
 		sessionStorage: createDefaultPiSessionStorage(metadata),
 		metadata,
 		log,
-		createBackend: (session) => new SupervisorBackend(session, supervisor, () => piHost?.models() ?? [], log),
+		createBackend: (session) =>
+			new SupervisorBackend(session, supervisor, () => piHost?.models() ?? [], log, {
+				...(plugin?.attached ? { attached: (sessionId) => plugin.attached?.(sessionId) } : {}),
+				...(plugin?.ownsEvent ? { ownsEvent: (event) => plugin.ownsEvent?.(event) ?? false } : {}),
+			}),
+		...(plugin?.customizer ? { customizer: plugin.customizer } : {}),
 		...(uploads ? { prepareMessage: (sessionId, message) => uploads.adopt(sessionId, message) } : {}),
 	});
 	const { host: ahpHost, changesets, terminals, watches, webhooks } = piHost;
+	if (plugin?.sessionDeleted) piHost.sessions.onSessionDeletionCommitted((sessionId) => plugin.sessionDeleted?.(sessionId));
 	let uploadServer: { close(): Promise<void> } | undefined;
 	if (uploads && uploadSocket) {
 		// A deleted session takes its uploads along; what was deleted while this host was down goes now.
@@ -127,6 +145,7 @@ async function main(): Promise<void> {
 			terminals.shutdown();
 			webhooks.dispose();
 			await Promise.all([changesets.dispose(), watches.dispose()]);
+			plugin?.dispose?.();
 			supervisor.close();
 			process.exit(0);
 		});

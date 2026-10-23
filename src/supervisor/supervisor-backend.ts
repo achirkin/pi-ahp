@@ -23,6 +23,14 @@ interface Waiter {
 /** The models the host advertises right now (`PiHost.models`). */
 export type ModelList = () => readonly Model<never>[];
 
+/** Callbacks of the host that composes the backend. */
+export interface SupervisorBackendHooks {
+	/** The session is attached to the supervisor's pi child (after the first attach and after each mode change). */
+	attached?: (sessionId: string) => void;
+	/** The event is the host's own news (a plugin's), not pi's: it must not reach the chat. */
+	ownsEvent?: (event: { type?: string }) => boolean;
+}
+
 export class SupervisorBackend implements PiBackend {
 	private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
 	private readonly socket: SupervisorSocket;
@@ -31,14 +39,24 @@ export class SupervisorBackend implements PiBackend {
 	private readonly log: (message: string) => void;
 	private turnDone: Waiter | undefined;
 	private attached = false;
+	/** The mode the child was last attached in; `undefined` while no message has named one (the host keeps what it stored). */
+	private attachedMode: string | undefined;
+	private readonly hooks: SupervisorBackendHooks;
 	private detached = false;
 	private selection: ModelSelection | undefined;
 	private readonly detachForward: () => void;
 	/** The folders the host that runs pi last accepted for this session, to send changes only. */
 	private acceptedFolders: string[] | undefined;
 
-	constructor(session: LiveSession, socket: SupervisorSocket, models: ModelList, log?: (message: string) => void) {
+	constructor(
+		session: LiveSession,
+		socket: SupervisorSocket,
+		models: ModelList,
+		log?: (message: string) => void,
+		hooks: SupervisorBackendHooks = {},
+	) {
 		this.session = session;
+		this.hooks = hooks;
 		this.socket = socket;
 		this.models = models;
 		this.log = log ?? (() => {});
@@ -49,7 +67,9 @@ export class SupervisorBackend implements PiBackend {
 			const event = message.event as AgentSessionEvent | undefined;
 			if (!event) return;
 			const type = (event as { type?: string }).type;
+			if (this.hooks.ownsEvent?.(event as { type?: string })) return;
 			// pi RPC's own vocabulary: a turn is over when pi settles; `child_exit` is the supervisor's own event.
+			if (type === "thinking_level_changed") this.followLevel((event as { level?: unknown }).level); // before the listeners read the selection
 			if (type === "agent_settled") this.settle(undefined);
 			if (type === "child_exit") this.settle(new Error("pi stopped while the turn was running"));
 			for (const listener of this.listeners) listener(event);
@@ -82,17 +102,35 @@ export class SupervisorBackend implements PiBackend {
 	async ensure(): Promise<void> {
 		if (this.detached) return;
 		await this.syncFolders();
-		if (this.attached) return;
-		const data = await this.socket.request("attach", { path: this.session.workingDirectory, session: this.session.sessionId });
+		// A message in another mode restarts the child in it (the host refuses while a turn runs, which a client cannot start).
+		const mode = this.session.mode;
+		if (this.attached && (mode === undefined || mode === this.attachedMode)) return;
+		const data = await this.socket.request("attach", {
+			path: this.session.workingDirectory,
+			session: this.session.sessionId,
+			...(mode !== undefined ? { mode } : {}),
+		});
 		this.attached = true;
-		const state = data.state as { model?: { provider?: string; id?: string }; thinkingLevel?: string } | undefined;
-		if (state?.model?.id) {
-			const known = this.models().find((m) => m.id === state.model!.id && (!state.model!.provider || m.provider === state.model!.provider));
-			this.selection = {
-				id: known ? modelSelectionId(known) : state.model.id,
-				...(state.thinkingLevel ? { config: { [THINKING_CONFIG_KEY]: state.thinkingLevel } } : {}),
-			};
-		}
+		this.attachedMode = mode ?? (typeof data.mode === "string" ? data.mode : undefined);
+		this.hooks.attached?.(this.session.sessionId);
+		this.followState(data.state);
+	}
+
+	/** The selection of the child's `get_state`: what the model and the effort really are, after pi's own clamping. */
+	private followState(value: unknown): void {
+		const state = value as { model?: { provider?: string; id?: string }; thinkingLevel?: string } | undefined;
+		if (!state?.model?.id) return;
+		const known = this.models().find((m) => m.id === state.model!.id && (!state.model!.provider || m.provider === state.model!.provider));
+		this.selection = {
+			id: known ? modelSelectionId(known) : state.model.id,
+			...(state.thinkingLevel ? { config: { [THINKING_CONFIG_KEY]: state.thinkingLevel } } : {}),
+		};
+	}
+
+	/** pi changed its effort on its own (a pick in the web chat, a command): the selection follows, so the draft can say so. */
+	private followLevel(level: unknown): void {
+		if (typeof level !== "string" || !this.selection) return;
+		this.selection = { id: this.selection.id, config: { ...this.selection.config, [THINKING_CONFIG_KEY]: level } };
 	}
 
 	subscribe(listener: (event: AgentSessionEvent) => void): () => void {
@@ -101,7 +139,7 @@ export class SupervisorBackend implements PiBackend {
 	}
 
 	async prompt(text: string, images?: ImageContent[], signal?: AbortSignal): Promise<void> {
-		this.log(`prompt: ${text.slice(0, 40)}`);
+		this.log(`prompt${this.session.mode ? ` [${this.session.mode}]` : ""}: ${text.slice(0, 40)}`);
 		if (signal?.aborted) return;
 		await this.ensure();
 		const done = this.awaitTurn(signal);
@@ -136,7 +174,9 @@ export class SupervisorBackend implements PiBackend {
 		if (typeof level === "string") {
 			await this.socket.request("call", { session: this.session.sessionId, command: { type: "set_thinking_level", level } }).catch(() => {});
 		}
-		this.selection = { id: modelSelectionId(model), ...(typeof level === "string" ? { config: { [THINKING_CONFIG_KEY]: level } } : {}) };
+		// pi may have clamped the effort to what the model supports: the selection is what it reports, not what was asked.
+		const reply = await this.socket.request("call", { session: this.session.sessionId, command: { type: "get_state" } });
+		this.followState((reply.response as { data?: unknown } | undefined)?.data);
 	}
 
 	currentSelection(): ModelSelection | undefined {

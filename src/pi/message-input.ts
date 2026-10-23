@@ -133,8 +133,9 @@ function prepareMessage(value: unknown): PreparedMessage {
 	if (value.model !== undefined && (!isRecord(value.model) || typeof value.model.id !== "string")) {
 		return { rejectionReason: "A message model requires an id" };
 	}
-	if (value.agent !== undefined) {
-		return { rejectionReason: "This host does not support custom agents" };
+	// Which agents exist is the host's to decide (see SessionCustomizer); here only the shape: pi gets the text alone.
+	if (value.agent !== undefined && (!isRecord(value.agent) || typeof value.agent.uri !== "string")) {
+		return { rejectionReason: "A message agent requires a uri" };
 	}
 	const message = value as unknown as Message;
 

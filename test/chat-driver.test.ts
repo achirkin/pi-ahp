@@ -20,6 +20,7 @@ import {
 	type ChatState,
 	MessageAttachmentKind,
 	MessageKind,
+	type ModelSelection,
 	PendingMessageKind,
 	SessionLifecycle,
 	type SessionState,
@@ -109,8 +110,20 @@ class ScriptedBackend implements PiBackend {
 		this.#settlePrompt();
 	}
 
-	async selectModel(): Promise<void> {
+	/** What pi runs on; a test changes it the way a pick in another client would, then emits the event pi emits for it. */
+	selection: ModelSelection | undefined;
+	readonly applied: ModelSelection[] = [];
+
+	currentSelection(): ModelSelection | undefined {
+		return this.selection;
+	}
+
+	async selectModel(selection?: ModelSelection): Promise<void> {
 		this.selections += 1;
+		if (selection) {
+			this.applied.push(selection);
+			this.selection = selection;
+		}
 		await this.selectionGate;
 	}
 }
@@ -230,6 +243,46 @@ describe("chat driver", () => {
 		assert.equal(session.chats.length, 1);
 		assert.equal(session.chats[0]?.resource, fixture.chatChannel);
 		assert.equal(session.defaultChat, fixture.chatChannel);
+	});
+
+	it("follows the effort pi reports, and applies a picker only when the user moved it", async () => {
+		const pick = (level: string): ModelSelection => ({ id: "pi/a", config: { thinkingLevel: level } });
+		const draft = () => (fixture.host.store.get(fixture.chatChannel) as ChatState).draft?.model;
+		const changeElsewhere = async (level: string) => {
+			backend.selection = pick(level); // the web chat's pick, or pi's own command
+			backend.emit({ type: "thinking_level_changed", level } as unknown as AgentSessionEvent);
+			await eventually(`the draft to say ${level}`, () => draft()?.config?.thinkingLevel === level);
+		};
+		let sent = 0;
+		const send = async (model: ModelSelection) => {
+			sent += 1;
+			fixture.client.dispatch(fixture.chatChannel, {
+				type: ActionType.ChatTurnStarted,
+				turnId: `t-effort-${sent}`,
+				startedAt: new Date().toISOString(),
+				message: { text: `m${sent}`, origin: { kind: MessageKind.User }, model },
+			});
+			await eventually(`turn ${sent} to complete`, () => (fixture.host.store.get(fixture.chatChannel) as ChatState).turns.length === sent);
+		};
+
+		backend.selection = pick("medium");
+		await changeElsewhere("low");
+		assert.deepEqual(draft(), pick("low"), "the draft tells every client what is in effect");
+
+		await send(pick("medium")); // the editor's user moved the picker
+		assert.deepEqual(backend.applied, [pick("medium")]);
+		await send(pick("medium")); // nothing moved
+		assert.equal(backend.applied.length, 1);
+
+		await changeElsewhere("high");
+		await send(pick("medium")); // the editor's picker is stale: it must not undo the change
+		assert.equal(backend.applied.length, 1, "an unmoved picker leaves pi's effort alone");
+		assert.equal(backend.selection?.config?.thinkingLevel, "high");
+
+		await send(pick("high")); // a client that follows the draft shows what is in effect
+		assert.equal(backend.applied.length, 1);
+		await send(pick("low")); // a new pick
+		assert.deepEqual(backend.applied, [pick("medium"), pick("low")]);
 	});
 
 	it("runs a client turn through the backend and streams the reply back", async () => {

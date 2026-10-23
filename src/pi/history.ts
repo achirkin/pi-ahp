@@ -116,7 +116,7 @@ type StoredTurnResult =
 interface PendingTurn {
 	readonly id: string;
 	readonly startedAt: string;
-	readonly message: Message;
+	message: Message;
 	readonly parts: ResponsePart[];
 	/** Pi entries in this turn that a later context edit may target. */
 	readonly entryIds: Set<string>;
@@ -147,6 +147,12 @@ export interface RebuiltHistory {
 	 */
 	readonly anchors: ReadonlyMap<string, string>;
 }
+
+/**
+ * The custom entry a pi extension appends to say which AHP agent (a client's mode, `Message.agent`) the runs after it use:
+ * `data.agent` is the agent's URI; an entry without one means the client's default agent.
+ */
+export const AGENT_ENTRY = "ahp-agent";
 
 /** Key under which the whole-conversation anchor is stored. */
 export const CLEAR_ALL_ANCHOR = "";
@@ -196,12 +202,19 @@ export function rebuildHistory(entries: readonly SessionEntry[], options: Rebuil
 		toolCallParts = new Map();
 	};
 
+	/** The agent (mode) the session file records last, as the URI the host advertises; none means the default Agent. */
+	let activeAgent: string | undefined;
+	const withAgent = (message: Message): Message => {
+		const { agent: _dropped, ...rest } = message;
+		return activeAgent ? { ...rest, agent: { uri: activeAgent } } : rest;
+	};
+
 	const openTurn = (entry: SessionEntry, message: Message): PendingTurn => {
 		closeTurn();
 		const turn: PendingTurn = {
 			id: `${prefix}-${entry.id}`,
 			startedAt: entry.timestamp,
-			message,
+			message: withAgent(message),
 			parts: [],
 			entryIds: new Set([entry.id]),
 			usage: undefined,
@@ -243,6 +256,15 @@ export function rebuildHistory(entries: readonly SessionEntry[], options: Rebuil
 			// An anchor before the edit would revive that attempt in model context.
 			// Edits targeting older turns must not advance this turn's anchor.
 			if (current?.entryIds.has(entry.targetId)) current.anchor = entry.id;
+			continue;
+		}
+
+		if (entry.type === "custom" && entry.customType === AGENT_ENTRY) {
+			// The entry records the agent a run starts in. It may come just after the user message of its turn: a turn that
+			// has no response yet takes it, any later turn inherits it until the next entry.
+			const data = entry.data as { agent?: unknown } | undefined;
+			activeAgent = typeof data?.agent === "string" ? data.agent : undefined;
+			if (current && current.parts.length === 0) current.message = withAgent(current.message);
 			continue;
 		}
 

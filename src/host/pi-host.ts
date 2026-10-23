@@ -23,7 +23,12 @@ import { ResourceWatchService } from "../pi/resource-watch.ts";
 import type { PiSessionCatalogue } from "../pi/session-catalogue.ts";
 import { SessionConfigService } from "../pi/session-config.ts";
 import { SessionHydrator } from "../pi/session-hydrator.ts";
-import { type BackendFactory, type SessionFileDeletionResult, SessionRegistry } from "../pi/session-registry.ts";
+import {
+	type BackendFactory,
+	type SessionCustomizer,
+	type SessionFileDeletionResult,
+	SessionRegistry,
+} from "../pi/session-registry.ts";
 import type { PiSessionStorage } from "../pi/session-storage.ts";
 import { TerminalService } from "./terminal-service.ts";
 import { WebhookNotifications } from "./webhook-notifications.ts";
@@ -58,6 +63,8 @@ export interface PiHostOptions extends HostOptions {
 	readonly resourceRoots?: readonly string[];
 	/** Rewrites a user's message for its session just before pi gets it (see {@link UploadStore.adopt}). */
 	readonly prepareMessage?: (sessionId: string, message: Message) => Message;
+	/** Gives `Message.agent` and the customization actions a meaning (see {@link SessionCustomizer}). */
+	readonly customizer?: SessionCustomizer;
 }
 
 export interface PiHost {
@@ -106,7 +113,12 @@ export async function createPiHost(options: PiHostOptions): Promise<PiHost> {
 	// A user with no configured provider still gets a usable host — they just
 	// see an agent with no models, which is the honest representation.
 	let models: readonly Model<never>[] = (await modelRuntime.getAvailable().catch(() => [])) as never;
-	installRootChannel(host, [buildAgentInfo(models)]);
+	installRootChannel(host, [
+		{
+			...buildAgentInfo(models),
+			...(options.customizer ? { customizations: options.customizer.rootCustomizations() } : {}),
+		},
+	]);
 
 	const fallbackSelection = (): ModelSelection | undefined => {
 		const configuredProvider = settingsManager?.getDefaultProvider();
@@ -154,6 +166,7 @@ export async function createPiHost(options: PiHostOptions): Promise<PiHost> {
 		deleteFile: options.deleteFile ?? deleteSessionFile,
 		findSessionFile: (id) => catalogue.findSessionFile(id),
 		...(options.prepareMessage ? { prepareMessage: options.prepareMessage } : {}),
+		...(options.customizer ? { customizer: options.customizer } : {}),
 		...(options.log ? { log: options.log } : {}),
 	});
 	const sessionHydrator = new SessionHydrator({

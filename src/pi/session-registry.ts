@@ -17,7 +17,9 @@
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
 	ActionType,
+	type AgentSelection,
 	type ChatState,
+	type Customization,
 	type Message,
 	MessageKind,
 	type ModelSelection,
@@ -89,13 +91,66 @@ export interface LiveSession {
 	 * accepted (the refused directories leave the set), so the next message is not refused for the same reason.
 	 */
 	revertFolders?: (accepted: readonly string[]) => void;
+	/**
+	 * The mode the client last chose for this session (`Message.agent`, see {@link SessionCustomizer}); `undefined` until a
+	 * message names one. The backend hands it to the host that runs pi.
+	 */
+	mode?: string | undefined;
+}
+
+/** What a customizer may do for one session. */
+export interface SessionCustomizerContext {
+	readonly session: LiveSession;
+	/** Publishes a server action on the session channel. */
+	dispatch(action: StateAction): void;
+}
+
+/**
+ * Makes `Message.agent` and the customization actions mean something for a host: which agents exist, which mode a
+ * message runs in, which toggles a client may flip. A host without one rejects both, as the protocol allows.
+ */
+export interface SessionCustomizer {
+	/** The mode of a message that names no agent. */
+	readonly defaultMode: string;
+	/** What `AgentInfo.customizations` advertises. */
+	rootCustomizations(): Customization[];
+	/** The mode a message with this agent (or none) runs in. Throws for an agent that is not advertised. */
+	modeOf(agent: AgentSelection | undefined): string;
+	/** Why a message may not name this agent; `undefined` accepts it. */
+	agentRejection(agent: AgentSelection): string | undefined;
+	/** Why a customization action is refused; `undefined` accepts it. */
+	actionRejection(action: StateAction): string | undefined;
+	/** After an accepted customization action was applied to the state. */
+	onAction(context: SessionCustomizerContext, action: StateAction): void;
+	/** A session became available: publish what it offers. */
+	onSession(context: SessionCustomizerContext): void;
 }
 
 /** Creates the agent backend for a session. Absent in storage-only mode. */
 export type BackendFactory = (session: LiveSession) => Promise<PiBackend> | PiBackend;
 
-function userMessageRejectionReason(message: Message, originReason: string): string | undefined {
-	return messageRejectionReason(message) ?? (message.origin.kind === MessageKind.User ? undefined : originReason);
+function userMessageRejectionReason(
+	message: Message,
+	originReason: string,
+	customizer?: SessionCustomizer,
+): string | undefined {
+	const invalid = messageRejectionReason(message);
+	if (invalid) return invalid;
+	if (message.agent !== undefined) {
+		if (!customizer) return "This host does not support custom agents";
+		const unknown = customizer.agentRejection(message.agent);
+		if (unknown) return unknown;
+	}
+	return message.origin.kind === MessageKind.User ? undefined : originReason;
+}
+
+function isCustomizationAction(action: StateAction): boolean {
+	return (
+		action.type === ActionType.SessionCustomizationToggled ||
+		action.type === ActionType.SessionMcpServerStartRequested ||
+		action.type === ActionType.SessionMcpServerStopRequested ||
+		action.type === ActionType.SessionMcpServerBackgroundRequested
+	);
 }
 
 function unsupportedClientActionReason(action: StateAction): string | undefined {
@@ -177,6 +232,8 @@ export interface SessionRegistryOptions {
 	readonly findSessionFile?: (sessionId: string) => Promise<string | undefined>;
 	/** Rewrites a user's message for its session just before pi gets it. */
 	readonly prepareMessage?: (sessionId: string, message: Message) => Message;
+	/** Gives `Message.agent` and the customization actions a meaning; see {@link SessionCustomizer}. */
+	readonly customizer?: SessionCustomizer;
 	readonly log?: (message: string) => void;
 }
 
@@ -217,6 +274,10 @@ export class SessionRegistry {
 	constructor(options: SessionRegistryOptions) {
 		this.#options = options;
 		this.#host = options.host;
+		const customizer = options.customizer;
+		if (customizer) {
+			this.onSessionAvailable((session) => customizer.onSession(this.#customizerContext(session)));
+		}
 
 		// Client actions are routed to whichever channel owns them; the host
 		// core stays agnostic of chats and backends.
@@ -702,7 +763,11 @@ export class SessionRegistry {
 			return "This session is being disposed";
 		}
 
-		const unsupported = unsupportedClientActionReason(action);
+		const customizer = this.#options.customizer;
+		const unsupported =
+			customizer && isCustomizationAction(action)
+				? customizer.actionRejection(action)
+				: unsupportedClientActionReason(action);
 		if (unsupported) {
 			return unsupported;
 		}
@@ -728,6 +793,7 @@ export class SessionRegistry {
 				const invalid = userMessageRejectionReason(
 					action.message,
 					"A client can only start a turn with a user message",
+					customizer,
 				);
 				if (invalid) return invalid;
 				if (action.queuedMessageId !== undefined) {
@@ -747,7 +813,17 @@ export class SessionRegistry {
 				) {
 					return "A pending message requires an id and supported kind";
 				}
-				return userMessageRejectionReason(action.message, "A client can only queue a user message");
+				const rejected = userMessageRejectionReason(action.message, "A client can only queue a user message", customizer);
+				if (rejected) return rejected;
+				// A message that waits behind a running turn (or behind other queued messages) starts later, in the mode the
+				// session is in by then: it cannot name another one. On an idle chat it starts at once and picks the mode.
+				if (customizer && session && (chat?.activeTurn || (chat?.queuedMessages?.length ?? 0) > 0 || action.kind === PendingMessageKind.Steering)) {
+					const mode = customizer.modeOf(action.message.agent);
+					if (mode !== (session.mode ?? customizer.defaultMode)) {
+						return "A message sent while pi is busy runs in the mode of the running turn; send it after the turn, in the mode you want";
+					}
+				}
+				return undefined;
 			}
 			case ActionType.ChatPendingMessageRemoved:
 				if (typeof action.id !== "string") return "A pending message removal requires an id";
@@ -764,7 +840,7 @@ export class SessionRegistry {
 					: "Queued message order must be an array of ids";
 			case ActionType.ChatDraftChanged: {
 				if (action.draft === undefined) return undefined;
-				return userMessageRejectionReason(action.draft, "A client can only draft a user message");
+				return userMessageRejectionReason(action.draft, "A client can only draft a user message", customizer);
 			}
 			case ActionType.ChatTruncated: {
 				if (action.turnId !== undefined && (typeof action.turnId !== "string" || action.turnId.length === 0)) {
@@ -808,6 +884,18 @@ export class SessionRegistry {
 		if (!session) return;
 		// Truncation already navigated pi before its client action was committed.
 		if (action.type === ActionType.ChatTruncated) return;
+		// The turn's mode is known before the backend starts: the first message may be the one that picks Plan.
+		if (action.type === ActionType.ChatTurnStarted && this.#options.customizer) {
+			session.mode = this.#options.customizer.modeOf(action.message.agent);
+		}
+		// The chat's own client (the web chat, VS Code when a turn is queued) sends every message as a queued one; on an idle
+		// chat it is consumed at once, so it picks the mode of the turn it starts (a busy chat was checked at validation).
+		if (action.type === ActionType.ChatPendingMessageSet && action.kind === PendingMessageKind.Queued && this.#options.customizer) {
+			const chat = this.#host.store.get(channel) as ChatState | undefined;
+			if (!chat?.activeTurn && (chat?.queuedMessages?.length ?? 0) <= 1) {
+				session.mode = this.#options.customizer.modeOf(action.message.agent);
+			}
+		}
 		if (!session.driver) {
 			await this.#attachBackend(session);
 		}
@@ -898,7 +986,24 @@ export class SessionRegistry {
 		session.folders = [...accepted];
 	}
 
+	#customizerContext(session: LiveSession): SessionCustomizerContext {
+		return {
+			session,
+			dispatch: (action) => {
+				try {
+					this.#host.dispatchServerAction(session.uri, action);
+				} catch (error) {
+					this.#options.log?.(`customization update dropped for ${session.uri}: ${String(error)}`);
+				}
+			},
+		};
+	}
+
 	#handleSessionAction(session: LiveSession, action: StateAction): void {
+		if (this.#options.customizer && isCustomizationAction(action)) {
+			this.#options.customizer.onAction(this.#customizerContext(session), action);
+			return;
+		}
 		if (
 			action.type === ActionType.SessionWorkingDirectorySet ||
 			action.type === ActionType.SessionWorkingDirectoryRemoved ||

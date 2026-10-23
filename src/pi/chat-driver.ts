@@ -122,6 +122,14 @@ export class ChatDriver {
 	#pendingSteeringId: string | undefined;
 	/** Last steering-queue length pi reported, to detect a consumption. */
 	#steeringQueueLength = 0;
+	/**
+	 * The model and reasoning effort this host last told the clients are in effect (the draft it published, or the choice it
+	 * last applied). A message carries its client's picker; the picker only counts as a choice when it differs from this,
+	 * because a client that merely shows what it was told must not undo a change made elsewhere (the web chat, `/thinking`).
+	 */
+	#published: ModelSelection | undefined;
+	/** The picker the latest message carried. */
+	#lastSent: ModelSelection | undefined;
 
 	constructor(options: ChatDriverOptions) {
 		this.#host = options.host;
@@ -295,10 +303,20 @@ export class ChatDriver {
 				// session, so quiescence waits for this whole operation rather than only
 				// guarding the eventual prompt call.
 				if (message.model && this.#backend.selectModel) {
-					try {
-						await this.#backend.selectModel(message.model);
-					} catch (error) {
-						this.#log?.(`selectModel failed: ${String(error)}`);
+					// A picker is a choice only when the user moved it: it differs from what the host said is in effect and
+					// from what this client's previous message carried (a picker that does not follow the draft keeps sending
+					// its old value, and must not undo a change made in another client).
+					const moved = !isDeepStrictEqual(message.model, this.#published) && !isDeepStrictEqual(message.model, this.#lastSent);
+					if (!moved) {
+						this.#lastSent = message.model;
+					} else {
+						try {
+							await this.#backend.selectModel(message.model);
+							this.#lastSent = message.model;
+							this.#published = this.#backend.currentSelection?.() ?? message.model;
+						} catch (error) {
+							this.#log?.(`selectModel failed: ${String(error)}`);
+						}
 					}
 				}
 				if (this.#quiescence) await this.#quiescence.wait;
@@ -332,6 +350,11 @@ export class ChatDriver {
 	}
 
 	#onAgentEvent(event: AgentSessionEvent): void {
+		// The effort changed (a pick in another client, a command in pi): every client's picker follows, inside a turn or not.
+		if (event.type === "thinking_level_changed") {
+			this.publishDefaultSelection();
+			return;
+		}
 		// Handled before the active-turn check: a steering message is consumed
 		// during a run, but the queue can also be cleared outside one.
 		if (event.type === "queue_update") {
@@ -527,6 +550,7 @@ export class ChatDriver {
 		if (!selection) {
 			return;
 		}
+		this.#published = selection;
 		const state = this.#host.store.get(this.#chatChannel) as ChatState | undefined;
 		if (isDeepStrictEqual(state?.draft?.model, selection)) {
 			return;
